@@ -64,7 +64,7 @@ Do not commit that file.
 | `src/`             | Browser UI + LSB engine |
 | `server/`          | Vite plugin: OpenSSL, GPT, on-disk library |
 
-Generated PNGs under `images/source/` and `images/output/` are gitignored except for files already tracked.
+Generated files under `images/` and `payloads/` stay local (gitignored). Empty folder placeholders (`.gitkeep`) are in the repo.
 
 ## Basic use
 

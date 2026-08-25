@@ -1,4 +1,4 @@
-import { capacity, embed, extract, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
+import { capacity, embed, extract, stripFrame, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
 
 class ImageDataPolyfill {
   data: Uint8ClampedArray;
@@ -49,6 +49,14 @@ for (const config of configs) {
   assert(!decoded.binary, "should be utf8");
   assert(decoded.text === message, `roundtrip mismatch for ${JSON.stringify(config)}`);
   assert(source.data[3] === 255 && stego.data[3] === 255, "alpha must stay opaque");
+  const clean = stripFrame(stego, payload.length, config);
+  try {
+    extract(clean, config);
+    throw new Error("stripped carrier should have no frame");
+  } catch (error) {
+    assert(error instanceof Error && error.message === "NO FRAME DETECTED", "strip should remove magic");
+  }
+  assert(extract(stego, config).length === payload.length, "stego payload must survive strip of the copy");
 }
 
 const tiny = makeCarrier(8, 8);

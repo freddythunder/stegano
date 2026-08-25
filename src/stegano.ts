@@ -224,6 +224,13 @@ export function extract(source: PixelRaster, config: StegConfig): Uint8Array {
   return reader.readBytes(length);
 }
 
+/** Zero the LSB bits that hold the DDRP frame so SRC/DELTA have a clean original. */
+export function stripFrame(source: ImageData, payloadBytes: number, config: StegConfig): ImageData {
+  const clean = cloneImageData(source);
+  cursorFor(clean, config).writeBytes(new Uint8Array(HEADER_BYTES + payloadBytes));
+  return clean;
+}
+
 export function hasFrame(source: ImageData, config: StegConfig): boolean {
   try {
     const header = cursorFor(source, config).readBytes(HEADER_BYTES);

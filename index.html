@@ -283,8 +283,9 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <h3>VIEWS</h3>
             <p>
               <strong>SRC</strong> original · <strong>STEGO</strong> after embed · <strong>LSB</strong> amplified
-              bit-plane · <strong>DELTA</strong> original vs stego (needs an embed). Raise bits/channel and
-              watch LSB/DELTA light up.
+              bit-plane · <strong>DELTA</strong> original vs stego. Loading a PNG that already has a
+              <code>DDRP</code> frame strips those LSBs into SRC and opens on <strong>STEGO</strong> so LSB/DELTA
+              work immediately.
             </p>
           </section>
           <section>

@@ -3,7 +3,9 @@ dist
 .DS_Store
 *.local
 
-images/source/*
-images/output/*
+images/source/**
+images/output/**
+payloads/**
 !images/source/.gitkeep
 !images/output/.gitkeep
+!payloads/.gitkeep

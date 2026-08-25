@@ -6,6 +6,7 @@ import {
   extract,
   fromUtf8,
   hasFrame,
+  stripFrame,
   toUtf8,
   visualizeDelta,
   visualizeLsb,
@@ -375,17 +376,42 @@ function shelfNote(folder: LibraryFolder, saved: ShelfResult | null, miss = ""):
   return saved.skipped ? ` · ON REEL ${folder}/${saved.name}` : ` · SHELVED ${folder}/${saved.name}`;
 }
 
-async function ingest(image: ImageData, name: string, persist: PersistTarget = "source"): Promise<void> {
-  state.original = image;
-  state.stego = null;
-  state.name = name;
-  state.view = "carrier";
-  viewCam.userMoved = false;
+function setView(view: View): void {
+  state.view = view;
   document.querySelectorAll(".view-switch button").forEach((btn) => {
-    btn.classList.toggle("active", (btn as HTMLElement).dataset.view === "carrier");
+    btn.classList.toggle("active", (btn as HTMLElement).dataset.view === view);
   });
-  refreshView();
-  refreshIntel();
+}
+
+function applyBits(bits: BitsPerChannel): void {
+  state.bits = bits;
+  document.querySelectorAll("#bits-seg button").forEach((btn) => {
+    btn.classList.toggle("active", Number((btn as HTMLElement).dataset.bits) === bits);
+  });
+}
+
+function detectFrame(image: ImageData): { payload: Uint8Array; cfg: StegConfig } | null {
+  const attempts: StegConfig[] = [config()];
+  for (const bitsPerChannel of [1, 2, 3, 4] as BitsPerChannel[]) {
+    attempts.push({ bitsPerChannel, channels: { r: true, g: true, b: true } });
+  }
+  const seen = new Set<string>();
+  for (const cfg of attempts) {
+    const key = `${cfg.bitsPerChannel}:${Number(cfg.channels.r)}${Number(cfg.channels.g)}${Number(cfg.channels.b)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      return { payload: extract(image, cfg), cfg };
+    } catch {
+      /* try next bits/channels */
+    }
+  }
+  return null;
+}
+
+async function ingest(image: ImageData, name: string, persist: PersistTarget = "source"): Promise<void> {
+  state.name = name;
+  viewCam.userMoved = false;
 
   let shelved = "";
   if (persist) {
@@ -393,13 +419,36 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
     shelved = shelfNote(persist, saved);
   }
 
-  try {
-    const bytes = extract(image, config());
-    await revealPayload(bytes, `CARRIER INGESTED · ${name}${shelved}`);
-  } catch {
-    setStatus(`CARRIER INGESTED · ${name} · CLEAN — NO DDRP FRAME${shelved}`, "ok");
+  const found = detectFrame(image);
+  if (found) {
+    if (found.cfg.bitsPerChannel !== state.bits) applyBits(found.cfg.bitsPerChannel);
+    if (
+      found.cfg.channels.r !== state.channels.r ||
+      found.cfg.channels.g !== state.channels.g ||
+      found.cfg.channels.b !== state.channels.b
+    ) {
+      state.channels = { ...found.cfg.channels };
+      document.querySelectorAll("#ch-seg button").forEach((btn) => {
+        const ch = (btn as HTMLElement).dataset.ch as keyof ChannelMask;
+        btn.classList.toggle("active", state.channels[ch]);
+      });
+    }
+    state.stego = image;
+    state.original = stripFrame(image, found.payload.length, found.cfg);
+    setView("stego");
+    refreshView();
+    refreshIntel();
+    await revealPayload(found.payload, `STEGO INGESTED · ${name}${shelved}`);
+    refreshIntel();
+    return;
   }
+
+  state.original = image;
+  state.stego = null;
+  setView("carrier");
+  refreshView();
   refreshIntel();
+  setStatus(`CARRIER INGESTED · ${name} · CLEAN — NO DDRP FRAME${shelved}`, "ok");
 }
 
 function imageFromBitmap(source: CanvasImageSource, width: number, height: number): ImageData {
@@ -487,10 +536,7 @@ async function onEmbed(): Promise<void> {
       payload = toUtf8(wire);
     }
     state.stego = embed(state.original, payload, config());
-    state.view = "stego";
-    document.querySelectorAll(".view-switch button").forEach((btn) => {
-      btn.classList.toggle("active", (btn as HTMLElement).dataset.view === "stego");
-    });
+    setView("stego");
     refreshView();
     refreshIntel();
     const pipe = keyed() ? ` · ${cipherValue()}` : state.io === "bin" ? " · DDFILE RAW" : "";
@@ -692,10 +738,7 @@ async function onExport(): Promise<void> {
 function onWipe(): void {
   if (!state.original) return;
   state.stego = null;
-  state.view = "carrier";
-  document.querySelectorAll(".view-switch button").forEach((btn) => {
-    btn.classList.toggle("active", (btn as HTMLElement).dataset.view === "carrier");
-  });
+  setView("carrier");
   el<HTMLTextAreaElement>("message").value = "";
   clearBin();
   refreshView();
@@ -1040,9 +1083,7 @@ function wireUi(): void {
 
   document.querySelectorAll(".view-switch button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.view = ((btn as HTMLElement).dataset.view as View) ?? "carrier";
-      document.querySelectorAll(".view-switch button").forEach((other) => other.classList.remove("active"));
-      btn.classList.add("active");
+      setView(((btn as HTMLElement).dataset.view as View) ?? "carrier");
       if (state.view === "delta" && !state.stego) {
         setStatus("DELTA NEEDS AN EMBED FIRST", "warn");
       }
@@ -1052,9 +1093,7 @@ function wireUi(): void {
 
   document.querySelectorAll("#bits-seg button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.bits = Number((btn as HTMLElement).dataset.bits) as BitsPerChannel;
-      document.querySelectorAll("#bits-seg button").forEach((other) => other.classList.remove("active"));
-      btn.classList.add("active");
+      applyBits(Number((btn as HTMLElement).dataset.bits) as BitsPerChannel);
       refreshIntel();
       refreshView();
     });
