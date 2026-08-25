@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { extract, type BitsPerChannel, type StegConfig } from "../src/stegano.ts";
-import { decodePng } from "./png.ts";
+import { decodePng } from "../src/png.ts";
 
 export type LibraryFolder = "source" | "output";
 
@@ -65,7 +65,7 @@ function sha256(data: Buffer | Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function payloadKey(rgba: Buffer, width: number, height: number): string {
+function payloadKey(rgba: Uint8Array, width: number, height: number): string {
   const data = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
   const raster = { data, width, height };
   for (const bitsPerChannel of BIT_DEPTHS) {

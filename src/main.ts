@@ -14,7 +14,8 @@ import {
   type StegConfig,
 } from "./stegano";
 import { crypt, cryptRaw, estimateWiredBytes, fetchCiphers, looksLikeOpenssl, requestGptImage } from "./crypt";
-import { guessMime, isAudio, packFile, unpackFile, type PackedFile } from "./binfile";
+import { dumpEnvelope, guessMime, isAudio, isImage, isPdf, isVideo, packFile, recoverFile, type PackedFile } from "./binfile";
+import { decodePng, isPngBytes, pngToImageData } from "./png";
 import {
   deleteLibraryPng,
   libraryFileUrl,
@@ -288,7 +289,7 @@ function refreshIntel(): void {
 
 async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   const box = el<HTMLTextAreaElement>("message");
-  const direct = unpackFile(bytes);
+  const direct = recoverFile(bytes);
   if (direct) {
     armBinary(direct);
     applyIoMode("bin");
@@ -299,7 +300,7 @@ async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   if (keyed()) {
     try {
       const plain = await cryptRaw("decrypt", cipherValue(), keyValue(), bytes);
-      const packed = unpackFile(plain);
+      const packed = recoverFile(plain);
       if (packed) {
         armBinary(packed);
         applyIoMode("bin");
@@ -407,20 +408,40 @@ function imageFromBitmap(source: CanvasImageSource, width: number, height: numbe
   off.height = height;
   const offCtx = off.getContext("2d");
   if (!offCtx) throw new Error("NO OFFSCREEN CONTEXT");
-  offCtx.imageSmoothingEnabled = true;
+  offCtx.imageSmoothingEnabled = !(
+    source instanceof ImageBitmap && source.width === width && source.height === height
+  );
   offCtx.imageSmoothingQuality = "high";
   offCtx.drawImage(source, 0, 0, width, height);
   return offCtx.getImageData(0, 0, width, height);
 }
 
+const RAW_BITMAP: ImageBitmapOptions = {
+  colorSpaceConversion: "none",
+  premultiplyAlpha: "none",
+};
+
+async function bitmapFromBlob(blob: Blob): Promise<ImageBitmap> {
+  return createImageBitmap(blob, RAW_BITMAP);
+}
+
+async function ingestBlob(blob: Blob, name: string, persist: PersistTarget = "source"): Promise<void> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (isPngBytes(bytes)) {
+    await ingest(pngToImageData(await decodePng(bytes)), name, persist);
+    return;
+  }
+  const bitmap = await bitmapFromBlob(new Blob([bytes], { type: blob.type || "application/octet-stream" }));
+  await ingest(imageFromBitmap(bitmap, bitmap.width, bitmap.height), name, persist);
+  bitmap.close();
+}
+
 async function loadFile(file: File): Promise<void> {
-  const bitmap = await createImageBitmap(file);
-  await ingest(imageFromBitmap(bitmap, bitmap.width, bitmap.height), file.name);
+  await ingestBlob(file, file.name);
 }
 
 async function loadBlob(blob: Blob, name: string): Promise<void> {
-  const bitmap = await createImageBitmap(blob);
-  await ingest(imageFromBitmap(bitmap, bitmap.width, bitmap.height), name);
+  await ingestBlob(blob, name);
 }
 
 async function loadUrl(url: string): Promise<void> {
@@ -523,11 +544,28 @@ function clearBin(): void {
   if (state.binUrl) URL.revokeObjectURL(state.binUrl);
   state.bin = null;
   state.binUrl = "";
+  hideBinPreview();
+  const dump = el("bin-dump");
+  dump.textContent = "";
+  dump.hidden = true;
+  el("bin-info").textContent = "NO FILE ARMED — AUDIO, PDF, ZIP…";
+}
+
+function hideBinPreview(): void {
   const audio = el<HTMLAudioElement>("bin-audio");
   audio.pause();
   audio.removeAttribute("src");
   audio.hidden = true;
-  el("bin-info").textContent = "NO FILE ARMED — AUDIO, PDF, ZIP…";
+  const image = el<HTMLImageElement>("bin-image");
+  image.removeAttribute("src");
+  image.hidden = true;
+  const video = el<HTMLVideoElement>("bin-video");
+  video.pause();
+  video.removeAttribute("src");
+  video.hidden = true;
+  const pdf = el<HTMLIFrameElement>("bin-pdf");
+  pdf.removeAttribute("src");
+  pdf.hidden = true;
 }
 
 function refreshBinInfo(): void {
@@ -546,14 +584,27 @@ function armBinary(packed: PackedFile): void {
   state.bin = packed;
   state.binUrl = URL.createObjectURL(blobFromBytes(packed.bytes, packed.mime));
   refreshBinInfo();
-  const audio = el<HTMLAudioElement>("bin-audio");
+  const dumpNode = el("bin-dump");
+  dumpNode.textContent = dumpEnvelope(packed);
+  dumpNode.hidden = false;
+  hideBinPreview();
+  const url = state.binUrl;
   if (isAudio(packed.mime)) {
-    audio.src = state.binUrl;
+    const audio = el<HTMLAudioElement>("bin-audio");
+    audio.src = url;
     audio.hidden = false;
-  } else {
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.hidden = true;
+  } else if (isImage(packed.mime)) {
+    const image = el<HTMLImageElement>("bin-image");
+    image.src = url;
+    image.hidden = false;
+  } else if (isVideo(packed.mime)) {
+    const video = el<HTMLVideoElement>("bin-video");
+    video.src = url;
+    video.hidden = false;
+  } else if (isPdf(packed.mime)) {
+    const pdf = el<HTMLIFrameElement>("bin-pdf");
+    pdf.src = url;
+    pdf.hidden = false;
   }
 }
 
@@ -602,7 +653,7 @@ async function onGptGen(): Promise<void> {
     const result = await requestGptImage(prompt, size.width, size.height);
     const blob = b64ToBlob(result.b64, result.mime);
     const targetKey = `${size.width}x${size.height}`;
-    const bitmap = await createImageBitmap(blob);
+    const bitmap = await bitmapFromBlob(blob);
     const raster = imageFromBitmap(bitmap, size.width, size.height);
     bitmap.close();
     await ingest(raster, `GPT-${targetKey}.png`, "source");
@@ -748,11 +799,8 @@ async function loadLibraryItem(name: string): Promise<void> {
     const response = await fetch(libraryFileUrl(libFolder, name));
     if (!response.ok) throw new Error("READ FAILED");
     const blob = await response.blob();
-    const bitmap = await createImageBitmap(blob);
-    const raster = imageFromBitmap(bitmap, bitmap.width, bitmap.height);
-    bitmap.close();
     closeLibrary();
-    await ingest(raster, name, false);
+    await ingestBlob(blob, name, false);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "LIBRARY LOAD FAILED", "err");
   }

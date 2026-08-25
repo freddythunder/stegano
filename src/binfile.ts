@@ -1,3 +1,5 @@
+import { hexDump } from "./stegano";
+
 export type PackedFile = {
   name: string;
   mime: string;
@@ -101,6 +103,15 @@ export function guessMime(name: string, reported = ""): string {
     aac: "audio/aac",
     flac: "audio/flac",
     webm: "audio/webm",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
     pdf: "application/pdf",
     zip: "application/zip",
     bin: "application/octet-stream",
@@ -108,6 +119,76 @@ export function guessMime(name: string, reported = ""): string {
   return map[ext] || "application/octet-stream";
 }
 
+export function sniffMime(bytes: Uint8Array): string {
+  const at = (offset: number, ascii: string) =>
+    ascii.split("").every((ch, i) => bytes[offset + i] === ch.charCodeAt(0));
+  if (bytes.length >= 8 && bytes[0] === 0x89 && at(1, "PNG")) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 6 && (at(0, "GIF87a") || at(0, "GIF89a"))) return "image/gif";
+  if (bytes.length >= 12 && at(0, "RIFF") && at(8, "WEBP")) return "image/webp";
+  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (bytes.length >= 12 && at(0, "RIFF") && at(8, "WAVE")) return "audio/wav";
+  if (bytes.length >= 4 && at(0, "OggS")) return "audio/ogg";
+  if (bytes.length >= 4 && at(0, "fLaC")) return "audio/flac";
+  if (bytes.length >= 3 && at(0, "ID3")) return "audio/mpeg";
+  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  if (bytes.length >= 8 && bytes[4] === 0x66 && at(4, "ftyp")) {
+    return at(8, "M4A") || at(8, "mp4a") ? "audio/mp4" : "video/mp4";
+  }
+  if (bytes.length >= 5 && at(0, "%PDF-")) return "application/pdf";
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+    return "application/zip";
+  }
+  return "";
+}
+
+export function recoverFile(data: Uint8Array): PackedFile | null {
+  const packed = unpackFile(data);
+  if (packed) {
+    const sniffed = sniffMime(packed.bytes);
+    if (sniffed && (!packed.mime || packed.mime === "application/octet-stream")) {
+      return { ...packed, mime: sniffed };
+    }
+    return packed;
+  }
+  const mime = sniffMime(data);
+  if (!mime) return null;
+  const ext = mime === "audio/mpeg" ? "mp3" : mime.split("/")[1]?.split("+")[0] || "bin";
+  return { name: `payload.${ext}`, mime, bytes: data, envelope: data };
+}
+
+export function dumpEnvelope(packed: PackedFile): string {
+  let header = "";
+  if (startsWith(packed.envelope, MAGIC)) {
+    const rest = packed.envelope.subarray(MAGIC.length);
+    const nl = indexOfByte(rest, 10);
+    if (nl >= 0) {
+      header = new TextDecoder("utf-8", { fatal: false }).decode(
+        packed.envelope.subarray(0, MAGIC.length + nl + 1),
+      );
+    }
+  }
+  const shown = Math.min(packed.bytes.length, 4096);
+  const dump = hexDump(packed.bytes.subarray(0, shown));
+  const more =
+    packed.bytes.length > shown
+      ? `\n… ${packed.bytes.length - shown} more bytes (${packed.bytes.length.toLocaleString()} B total)`
+      : "";
+  return header ? `${header.trimEnd()}\n\n${dump}${more}` : `${dump}${more}`;
+}
+
 export function isAudio(mime: string): boolean {
   return mime.startsWith("audio/");
+}
+
+export function isImage(mime: string): boolean {
+  return mime.startsWith("image/");
+}
+
+export function isVideo(mime: string): boolean {
+  return mime.startsWith("video/");
+}
+
+export function isPdf(mime: string): boolean {
+  return mime === "application/pdf";
 }

@@ -228,7 +228,13 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
                 </label>
                 <span id="bin-info" class="bin-info">NO FILE ARMED — AUDIO, PDF, ZIP…</span>
               </div>
-              <audio id="bin-audio" class="bin-audio" controls hidden></audio>
+              <div id="bin-preview" class="bin-preview">
+                <audio id="bin-audio" class="bin-audio" controls hidden></audio>
+                <img id="bin-image" class="bin-image" alt="" hidden />
+                <video id="bin-video" class="bin-video" controls hidden></video>
+                <iframe id="bin-pdf" class="bin-pdf" title="Hidden PDF" hidden></iframe>
+              </div>
+              <pre id="bin-dump" class="bin-dump" hidden></pre>
               <p class="bin-note">
                 PIPE: FILE → LSB (raw bytes). A small DDFILE header is the only extra. Short clips fit a
                 768×512 / 1 LSB carrier; bump W×H or bits/channel for larger files.
@@ -295,8 +301,10 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <p>
               Toggle <strong>BIN</strong>, load any file (wav, mp3, pdf, zip…). A tiny <code>DDFILE</code> header
               plus the <strong>raw bytes</strong> go into the LSBs — no Base64 on the file itself (UTF-8 is only
-              for text messages). Extract restores the original bytes. A key encrypts those bytes with OpenSSL
-              first. Scaling the carrier after embed will destroy the file.
+              for text messages).               Extract (and LIB → OUTPUT) restores the original bytes and reconstructs a preview —
+              audio player, nested image, video, or PDF — while keeping the DDFILE header and hex dump.
+              A key encrypts those bytes with OpenSSL first. Scaling the carrier after embed will destroy
+              the file.
             </p>
           </section>
           <section>

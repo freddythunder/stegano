@@ -1,14 +1,25 @@
-import { inflate } from "node:zlib";
-import { promisify } from "node:util";
-
-const inflateAsync = promisify(inflate);
-const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
 export type DecodedPng = {
   width: number;
   height: number;
-  rgba: Buffer;
+  rgba: Uint8Array;
 };
+
+const PNG_MAGIC = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+export function isPngBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < 8) return false;
+  return PNG_MAGIC.every((value, i) => bytes[i] === value);
+}
+
+function u32(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0
+  );
+}
+
+function ascii(bytes: Uint8Array, offset: number, length: number): string {
+  return String.fromCharCode(...bytes.subarray(offset, offset + length));
+}
 
 function paeth(a: number, b: number, c: number): number {
   const p = a + b - c;
@@ -20,18 +31,23 @@ function paeth(a: number, b: number, c: number): number {
   return c;
 }
 
-function unfilter(raw: Buffer, width: number, height: number, bpp: number): Buffer {
+async function inflateZlib(data: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const stream = new Blob([copy]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function unfilter(raw: Uint8Array, width: number, height: number, bpp: number): Uint8Array {
   const stride = width * bpp;
-  const out = Buffer.alloc(height * stride);
+  const out = new Uint8Array(height * stride);
   let src = 0;
   for (let y = 0; y < height; y++) {
     const filter = raw[src++];
-    const row = raw.subarray(src, src + stride);
-    src += stride;
     const destOff = y * stride;
     const prevOff = (y - 1) * stride;
     for (let i = 0; i < stride; i++) {
-      const x = row[i];
+      const x = raw[src++];
       const a = i >= bpp ? out[destOff + i - bpp] : 0;
       const b = y > 0 ? out[prevOff + i] : 0;
       const c = y > 0 && i >= bpp ? out[prevOff + i - bpp] : 0;
@@ -61,19 +77,19 @@ function unfilter(raw: Buffer, width: number, height: number, bpp: number): Buff
   return out;
 }
 
-function toRgba(pixels: Buffer, width: number, height: number, colorType: number): Buffer {
+function toRgba(pixels: Uint8Array, width: number, height: number, colorType: number): Uint8Array {
   const count = width * height;
-  const rgba = Buffer.alloc(count * 4);
+  const rgba = new Uint8Array(count * 4);
   if (colorType === 6) {
-    pixels.copy(rgba);
+    rgba.set(pixels);
     return rgba;
   }
   if (colorType === 2) {
     for (let i = 0, p = 0; i < count; i++, p += 3) {
       const o = i * 4;
-      rgba[o] = pixels[p];
-      rgba[o + 1] = pixels[p + 1];
-      rgba[o + 2] = pixels[p + 2];
+      rgba[o] = pixels[p] ?? 0;
+      rgba[o + 1] = pixels[p + 1] ?? 0;
+      rgba[o + 2] = pixels[p + 2] ?? 0;
       rgba[o + 3] = 255;
     }
     return rgba;
@@ -81,7 +97,7 @@ function toRgba(pixels: Buffer, width: number, height: number, colorType: number
   if (colorType === 0) {
     for (let i = 0; i < count; i++) {
       const o = i * 4;
-      const g = pixels[i];
+      const g = pixels[i] ?? 0;
       rgba[o] = g;
       rgba[o + 1] = g;
       rgba[o + 2] = g;
@@ -92,41 +108,39 @@ function toRgba(pixels: Buffer, width: number, height: number, colorType: number
   if (colorType === 4) {
     for (let i = 0, p = 0; i < count; i++, p += 2) {
       const o = i * 4;
-      const g = pixels[p];
+      const g = pixels[p] ?? 0;
       rgba[o] = g;
       rgba[o + 1] = g;
       rgba[o + 2] = g;
-      rgba[o + 3] = pixels[p + 1];
+      rgba[o + 3] = pixels[p + 1] ?? 255;
     }
     return rgba;
   }
   throw new Error("UNSUPPORTED PNG COLOR TYPE");
 }
 
-export async function decodePng(png: Buffer): Promise<DecodedPng> {
-  if (png.length < 8 || !png.subarray(0, 8).equals(PNG_MAGIC)) {
-    throw new Error("NOT A PNG");
-  }
+export async function decodePng(png: Uint8Array): Promise<DecodedPng> {
+  if (!isPngBytes(png)) throw new Error("NOT A PNG");
   let offset = 8;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
   let colorType = 0;
   let interlace = 0;
-  const idat: Buffer[] = [];
+  const idat: Uint8Array[] = [];
   while (offset + 8 <= png.length) {
-    const len = png.readUInt32BE(offset);
-    const type = png.toString("ascii", offset + 4, offset + 8);
+    const len = u32(png, offset);
+    const type = ascii(png, offset + 4, 4);
     const data = png.subarray(offset + 8, offset + 8 + len);
     offset += 12 + len;
     if (type === "IHDR") {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
+      width = u32(data, 0);
+      height = u32(data, 4);
       bitDepth = data[8] ?? 0;
       colorType = data[9] ?? 0;
       interlace = data[12] ?? 0;
     } else if (type === "IDAT") {
-      idat.push(Buffer.from(data));
+      idat.push(data);
     } else if (type === "IEND") {
       break;
     }
@@ -136,9 +150,22 @@ export async function decodePng(png: Buffer): Promise<DecodedPng> {
   if (interlace !== 0) throw new Error("INTERLACED PNG");
   const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 4 ? 2 : colorType === 0 ? 1 : 0;
   if (!bpp) throw new Error("UNSUPPORTED PNG COLOR TYPE");
-  const raw = await inflateAsync(Buffer.concat(idat));
+  const total = idat.reduce((n, chunk) => n + chunk.length, 0);
+  const merged = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of idat) {
+    merged.set(chunk, at);
+    at += chunk.length;
+  }
+  const raw = await inflateZlib(merged);
   const expected = height * (1 + width * bpp);
   if (raw.length < expected) throw new Error("PNG DATA SHORT");
   const filtered = unfilter(raw.subarray(0, expected), width, height, bpp);
   return { width, height, rgba: toRgba(filtered, width, height, colorType) };
+}
+
+export function pngToImageData(decoded: DecodedPng): ImageData {
+  const data = new Uint8ClampedArray(decoded.rgba.length);
+  data.set(decoded.rgba);
+  return new ImageData(data, decoded.width, decoded.height);
 }
