@@ -191,8 +191,9 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
               <button type="button" id="embed" class="primary">EMBED</button>
               <button type="button" id="extract">EXTRACT</button>
               <button type="button" id="gpt-gen" class="primary">GPT GEN</button>
-              <button type="button" id="bin-save">SAVE FILE</button>
-              <button type="button" id="export">EXPORT PNG</button>
+              <span id="export-wrap" class="tip-wrap">
+                <button type="button" id="export">EXPORT PNG</button>
+              </span>
               <button type="button" id="wipe">WIPE</button>
             </div>
           </div>
@@ -204,13 +205,34 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
               </label>
               <label class="crypto-field key-field">
                 <span>KEY</span>
-                <input
-                  id="key"
-                  type="password"
-                  placeholder="optional — empty keeps cleartext"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
+                <div class="key-wrap">
+                  <input
+                    id="key"
+                    type="password"
+                    placeholder="optional — empty keeps cleartext"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <button type="button" id="key-vis" class="key-vis" aria-label="Show key" aria-pressed="false" title="Show key">
+                    <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"
+                      />
+                      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6" />
+                    </svg>
+                    <svg class="eye-shut" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        d="M3 3l18 18M6.5 6.7C4.4 8.2 2.8 10.3 2 12c2.2 3.8 6 7 10 7 1.7 0 3.3-.5 4.8-1.3M9.9 5.2C10.6 5.1 11.3 5 12 5c4 0 7.8 3.2 10 7-.6 1-1.4 2-2.4 2.9M10.6 10.6a3 3 0 004.2 4.2"
+                      />
+                    </svg>
+                  </button>
+                </div>
               </label>
               <div id="pipe-label" class="pipe">TEXT → LSB</div>
             </div>
@@ -226,6 +248,7 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
                   <input id="bin-file" type="file" />
                   LOAD BINARY
                 </label>
+                <button type="button" id="bin-dl" hidden>DOWNLOAD</button>
                 <span id="bin-info" class="bin-info">NO FILE ARMED — AUDIO, PDF, ZIP…</span>
               </div>
               <div id="bin-preview" class="bin-preview">
@@ -284,8 +307,9 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <p>
               <strong>SRC</strong> original · <strong>STEGO</strong> after embed · <strong>LSB</strong> amplified
               bit-plane · <strong>DELTA</strong> original vs stego. Loading a PNG that already has a
-              <code>DDRP</code> frame strips those LSBs into SRC and opens on <strong>STEGO</strong> so LSB/DELTA
-              work immediately.
+              <code>DDRP</code> frame strips those LSBs into SRC, opens on <strong>STEGO</strong>, and
+              <strong>holds</strong> the hidden bytes. Payload and capacity stay on that held frame until you
+              <strong>EXTRACT</strong> (enter the key first if it was encrypted).
             </p>
           </section>
           <section>
@@ -302,10 +326,10 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <p>
               Toggle <strong>BIN</strong>, load any file (wav, mp3, pdf, zip…). A tiny <code>DDFILE</code> header
               plus the <strong>raw bytes</strong> go into the LSBs — no Base64 on the file itself (UTF-8 is only
-              for text messages).               Extract (and LIB → OUTPUT) restores the original bytes and reconstructs a preview —
+              for text messages). <strong>EXTRACT</strong> restores the original bytes and reconstructs a preview —
               audio player, nested image, video, or PDF — while keeping the DDFILE header and hex dump.
-              A key encrypts those bytes with OpenSSL first. Scaling the carrier after embed will destroy
-              the file.
+              Loading a stego PNG only holds the frame; it does not dump ciphertext into MSG. A key encrypts
+              those bytes with OpenSSL first. Scaling the carrier after embed will destroy the file.
             </p>
           </section>
           <section>
@@ -336,16 +360,18 @@ openssl enc -aes-256-cbc -d -a -A -pbkdf2 -pass pass:KEY</pre>
             <h3>LIBRARY</h3>
             <p>
               Carriers land in <code>images/source/</code> (GPT working size, SYNTH, local/URL loads, resizes).
-              Stego frames land in <code>images/output/</code> on EMBED. A second save with the same name,
-              pixel size, and payload is skipped. Open <strong>LIB</strong> to browse either reel and click a
-              still to load it. Scratch files you plan to hide live in <code>payloads/</code>.
+              Images that already contain a <code>DDRP</code> frame, and anything produced by EMBED, land in
+              <code>images/output/</code>. A second save with the same name, pixel size, and payload is skipped.
+              Open <strong>LIB</strong> to browse either reel and click a still to load it. Scratch files you
+              plan to hide live in <code>payloads/</code>.
             </p>
           </section>
           <section>
             <h3>KEEP IT</h3>
             <p>
-              Embed writes <code>images/output/</code>. <strong>EXPORT PNG</strong> only downloads — it does not
-              make a second copy. Reload from LIB, set the same cipher/key, and EXTRACT. WIPE restores the
+              Embed writes <code>images/output/</code>. <strong>EXPORT PNG</strong> downloads that stego
+              frame — it is disabled when the current payload will not fit. Reload from LIB, set the same
+              cipher/key, and EXTRACT. Recovered files download from <strong>BIN</strong>. WIPE restores the
               carrier and clears the message (not the key).
             </p>
           </section>

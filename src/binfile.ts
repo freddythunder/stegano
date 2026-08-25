@@ -120,18 +120,21 @@ export function guessMime(name: string, reported = ""): string {
 }
 
 export function sniffMime(bytes: Uint8Array): string {
+  return sniffMagic(bytes, true);
+}
+
+function sniffMagic(bytes: Uint8Array, weak: boolean): string {
   const at = (offset: number, ascii: string) =>
+    offset + ascii.length <= bytes.length &&
     ascii.split("").every((ch, i) => bytes[offset + i] === ch.charCodeAt(0));
   if (bytes.length >= 8 && bytes[0] === 0x89 && at(1, "PNG")) return "image/png";
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
   if (bytes.length >= 6 && (at(0, "GIF87a") || at(0, "GIF89a"))) return "image/gif";
   if (bytes.length >= 12 && at(0, "RIFF") && at(8, "WEBP")) return "image/webp";
-  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
   if (bytes.length >= 12 && at(0, "RIFF") && at(8, "WAVE")) return "audio/wav";
   if (bytes.length >= 4 && at(0, "OggS")) return "audio/ogg";
   if (bytes.length >= 4 && at(0, "fLaC")) return "audio/flac";
   if (bytes.length >= 3 && at(0, "ID3")) return "audio/mpeg";
-  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
   if (bytes.length >= 8 && bytes[4] === 0x66 && at(4, "ftyp")) {
     return at(8, "M4A") || at(8, "mp4a") ? "audio/mp4" : "video/mp4";
   }
@@ -139,22 +142,59 @@ export function sniffMime(bytes: Uint8Array): string {
   if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
     return "application/zip";
   }
+  if (weak && looksLikeBmp(bytes)) return "image/bmp";
+  if (weak && bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
   return "";
 }
 
+function looksLikeBmp(bytes: Uint8Array): boolean {
+  if (bytes.length < 14 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) return false;
+  const size = bytes[2] | (bytes[3] << 8) | (bytes[4] << 16) | (bytes[5] << 24);
+  const pixelOff = bytes[10] | (bytes[11] << 8) | (bytes[12] << 16) | (bytes[13] << 24);
+  return size >= 14 && size <= bytes.length && pixelOff >= 14 && pixelOff < size;
+}
+
+function locateBytes(data: Uint8Array, prefix: Uint8Array, limit: number): number {
+  const last = Math.min(limit, Math.max(0, data.length - prefix.length));
+  for (let i = 0; i <= last; i++) {
+    if (startsWith(data.subarray(i), prefix)) return i;
+  }
+  return -1;
+}
+
+function sliceMedia(data: Uint8Array): { mime: string; bytes: Uint8Array } | null {
+  const direct = sniffMagic(data, true);
+  if (direct) return { mime: direct, bytes: data };
+  const scan = Math.min(data.length, 4096);
+  for (let i = 1; i < scan; i++) {
+    const mime = sniffMagic(data.subarray(i), false);
+    if (mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/") || mime === "application/pdf") {
+      return { mime, bytes: data.subarray(i) };
+    }
+  }
+  return null;
+}
+
+function extForMime(mime: string): string {
+  if (mime === "audio/mpeg") return "mp3";
+  if (mime === "image/jpeg") return "jpg";
+  return mime.split("/")[1]?.split("+")[0] || "bin";
+}
+
 export function recoverFile(data: Uint8Array): PackedFile | null {
-  const packed = unpackFile(data);
+  const dd = locateBytes(data, MAGIC, 32);
+  const sliced = dd >= 0 ? data.subarray(dd) : data;
+  const packed = unpackFile(sliced);
   if (packed) {
-    const sniffed = sniffMime(packed.bytes);
-    if (sniffed && (!packed.mime || packed.mime === "application/octet-stream")) {
-      return { ...packed, mime: sniffed };
+    const head = sniffMagic(packed.bytes, true);
+    if (head && (packed.mime === "application/octet-stream" || packed.mime === "")) {
+      return { ...packed, mime: head };
     }
     return packed;
   }
-  const mime = sniffMime(data);
-  if (!mime) return null;
-  const ext = mime === "audio/mpeg" ? "mp3" : mime.split("/")[1]?.split("+")[0] || "bin";
-  return { name: `payload.${ext}`, mime, bytes: data, envelope: data };
+  const media = sliceMedia(data);
+  if (!media) return null;
+  return { name: `payload.${extForMime(media.mime)}`, mime: media.mime, bytes: media.bytes, envelope: data };
 }
 
 export function dumpEnvelope(packed: PackedFile): string {

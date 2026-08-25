@@ -75,7 +75,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
 
   if (path === "/api/crypt" && req.method === "POST") {
     try {
-      const body = JSON.parse((await readBody(req, 8_000_000)) || "{}") as CryptBody;
+      const body = JSON.parse((await readBody(req, 40_000_000)) || "{}") as CryptBody;
       if (body.op !== "encrypt" && body.op !== "decrypt") {
         send(res, 400, { error: "op must be encrypt|decrypt" });
         return true;
@@ -153,10 +153,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
   return false;
 }
 
+function ignoreOrphanPipeErrors(): void {
+  const tagged = process as NodeJS.Process & { __ddPipeGuard?: boolean };
+  if (tagged.__ddPipeGuard) return;
+  tagged.__ddPipeGuard = true;
+  process.on("uncaughtException", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE" || error.code === "ECONNRESET") {
+      console.warn("[dead-drop] ignored orphan pipe:", error.message);
+      return;
+    }
+    console.error(error);
+    process.exit(1);
+  });
+}
+
 export function opensslLab(): Plugin {
   return {
     name: "openssl-lab",
     configureServer(server) {
+      ignoreOrphanPipeErrors();
       void ensureLibrary();
       server.middlewares.use((req, res, next) => {
         void handle(req, res).then((hit) => {
@@ -165,6 +180,7 @@ export function opensslLab(): Plugin {
       });
     },
     configurePreviewServer(server) {
+      ignoreOrphanPipeErrors();
       void ensureLibrary();
       server.middlewares.use((req, res, next) => {
         void handle(req, res).then((hit) => {

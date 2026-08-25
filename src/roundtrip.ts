@@ -1,4 +1,6 @@
 import { capacity, embed, extract, stripFrame, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
+import { decodePng, encodePng, pngToImageData } from "./png.ts";
+import { crypt as opensslCrypt } from "../server/openssl.ts";
 
 class ImageDataPolyfill {
   data: Uint8ClampedArray;
@@ -72,6 +74,42 @@ try {
   throw new Error("should have rejected empty carrier");
 } catch (error) {
   assert(error instanceof Error && error.message === "NO FRAME DETECTED", "magic error");
+}
+
+{
+  const config = configs[0];
+  const source = makeCarrier(64, 48);
+  const stego = embed(source, payload, config);
+  const png = await encodePng(stego, { "dd-cipher": "aes-256-cbc" });
+  const decodedPng = await decodePng(png);
+  assert(decodedPng.text["dd-cipher"] === "aes-256-cbc", "cipher tEXt");
+  const back = pngToImageData(decodedPng);
+  assert(back.width === stego.width && back.height === stego.height, "png size");
+  for (let i = 0; i < stego.data.length; i++) {
+    assert(stego.data[i] === back.data[i], `png pixel ${i}`);
+  }
+  const decoded = fromUtf8(extract(back, config));
+  assert(!decoded.binary && decoded.text === message, "png encode must preserve LSBs");
+}
+
+{
+  const config: StegConfig = { bitsPerChannel: 1, channels: { r: true, g: true, b: true } };
+  const raw = new Uint8Array(2048);
+  raw[0] = 0xff;
+  raw[1] = 0xd8;
+  for (let i = 2; i < raw.length; i++) raw[i] = i & 255;
+  const header = new TextEncoder().encode(`DDFILE\n${JSON.stringify({ name: "x.jpg", mime: "image/jpeg", n: raw.length })}\n`);
+  const envelope = new Uint8Array(header.length + raw.length);
+  envelope.set(header);
+  envelope.set(raw, header.length);
+  const enc = await opensslCrypt("encrypt", "aes-256-cbc", "secret-key", envelope);
+  const stego = embed(makeCarrier(160, 120), enc, config);
+  const png = await encodePng(stego, { "dd-cipher": "aes-256-cbc" });
+  const pulled = extract(pngToImageData(await decodePng(png)), config);
+  const plain = await opensslCrypt("decrypt", "aes-256-cbc", "secret-key", pulled);
+  assert(plain.length === envelope.length, "decrypted envelope length");
+  assert(new TextDecoder().decode(plain.subarray(0, 7)) === "DDFILE\n", "ddfile magic");
+  assert(plain[plain.length - raw.length] === 0xff, "jpeg magic after decrypt");
 }
 
 console.log("ok", configs.length, "roundtrips");

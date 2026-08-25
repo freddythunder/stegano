@@ -230,6 +230,11 @@ body {
   flex-shrink: 0;
 }
 
+.payload-panel > .panel-head {
+  position: relative;
+  z-index: 7;
+}
+
 .tag {
   font-size: 10px;
   color: var(--bg);
@@ -284,7 +289,8 @@ body {
 .file-btn,
 .ingress button,
 .synth-bar button,
-.payload-actions button {
+.payload-actions button,
+.bin-row button {
   font-family: var(--font-ui);
   font-size: 11px;
   letter-spacing: 0.12em;
@@ -301,12 +307,21 @@ body {
 .ingress button:hover,
 .synth-bar button:hover,
 .payload-actions button:hover,
+.bin-row button:hover,
 .view-switch button:hover,
 .view-tools button:hover,
 .seg button:hover {
   color: var(--bg);
   background: var(--phos);
   border-color: var(--phos);
+}
+
+.payload-actions {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+  align-items: center;
 }
 
 .payload-actions .primary {
@@ -317,9 +332,44 @@ body {
 
 .payload-actions button:disabled,
 .ingress button:disabled,
-.synth-bar button:disabled {
+.synth-bar button:disabled,
+.bin-row button:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+.tip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.tip-wrap.blocked {
+  cursor: not-allowed;
+}
+
+.tip-wrap.blocked button:disabled {
+  pointer-events: none;
+}
+
+.tip-wrap[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  width: max-content;
+  max-width: min(320px, 70vw);
+  padding: 8px 10px;
+  background: #0c120e;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+  white-space: normal;
+  pointer-events: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 .viewport-body {
@@ -686,8 +736,7 @@ body {
 .payload-panel[data-mode="gpt"] #embed,
 .payload-panel[data-mode="gpt"] #extract,
 .payload-panel[data-mode="msg"] #gpt-gen,
-.payload-panel[data-mode="bin"] #gpt-gen,
-.payload-panel:not([data-mode="bin"]) #bin-save {
+.payload-panel[data-mode="bin"] #gpt-gen {
   display: none;
 }
 
@@ -751,6 +800,8 @@ body {
 .bin-image:not([hidden]) {
   object-fit: contain;
   image-rendering: auto;
+  min-height: 96px;
+  width: 100%;
 }
 
 .bin-pdf:not([hidden]) {
@@ -818,6 +869,52 @@ body {
   font-size: 12px;
   padding: 6px 8px;
   outline: none;
+}
+
+.key-wrap {
+  position: relative;
+}
+
+.key-wrap input {
+  padding-right: 34px;
+}
+
+.key-vis {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--phos-dim);
+  cursor: pointer;
+}
+
+.key-vis:hover {
+  color: var(--phos);
+}
+
+.key-vis svg {
+  width: 16px;
+  height: 16px;
+  display: none;
+}
+
+.key-vis .eye-open {
+  display: block;
+}
+
+.key-vis[aria-pressed="true"] .eye-open {
+  display: none;
+}
+
+.key-vis[aria-pressed="true"] .eye-shut {
+  display: block;
 }
 
 .crypto-field select:focus,

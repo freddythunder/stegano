@@ -15,8 +15,8 @@ import {
   type StegConfig,
 } from "./stegano";
 import { crypt, cryptRaw, estimateWiredBytes, fetchCiphers, looksLikeOpenssl, requestGptImage } from "./crypt";
-import { dumpEnvelope, guessMime, isAudio, isImage, isPdf, isVideo, packFile, recoverFile, type PackedFile } from "./binfile";
-import { decodePng, isPngBytes, pngToImageData } from "./png";
+import { dumpEnvelope, guessMime, isAudio, isImage, isPdf, isVideo, packFile, recoverFile, sniffMime, type PackedFile } from "./binfile";
+import { decodePng, encodePng, isPngBytes, pngToImageData } from "./png";
 import {
   deleteLibraryPng,
   libraryFileUrl,
@@ -43,7 +43,13 @@ const state = {
   io: "msg" as "msg" | "gpt" | "bin",
   bin: null as PackedFile | null,
   binUrl: "" as string,
+  binFromExtract: false,
+  heldFrame: null as Uint8Array | null,
 };
+
+let uiBusy = false;
+let pendingCipher = "";
+const CIPHER_STORE = "dd-cipher";
 
 const session = `DD-${Math.random().toString(16).slice(2, 6).toUpperCase()}-${String(
   Math.floor(Math.random() * 99),
@@ -79,22 +85,92 @@ function cipherValue(): string {
   return el<HTMLSelectElement>("cipher").value;
 }
 
+function applyStoredCipher(id: string | undefined): void {
+  if (!id) return;
+  const select = el<HTMLSelectElement>("cipher");
+  const match = [...select.options].some((opt) => opt.value === id);
+  if (match) {
+    select.value = id;
+    pendingCipher = "";
+    try {
+      localStorage.setItem(CIPHER_STORE, id);
+    } catch {
+      /* ignore quota */
+    }
+    refreshPipe();
+    return;
+  }
+  pendingCipher = id;
+}
+
+function rememberCipher(): void {
+  const id = cipherValue();
+  if (!id) return;
+  try {
+    localStorage.setItem(CIPHER_STORE, id);
+  } catch {
+    /* ignore quota */
+  }
+}
+
 function keyed(): boolean {
   return keyValue().length > 0;
+}
+
+function frameLooksKeyed(bytes: Uint8Array): boolean {
+  const n = Math.min(bytes.length, 24);
+  let head = "";
+  for (let i = 0; i < n; i++) head += String.fromCharCode(bytes[i] ?? 0);
+  return looksLikeOpenssl(head);
 }
 
 function payloadBytes(): number {
   if (state.io === "bin" && state.bin) {
     return estimateWiredBytes(state.bin.envelope.length, keyed());
   }
-  const n = toUtf8(el<HTMLTextAreaElement>("message").value).length;
+  const text = el<HTMLTextAreaElement>("message").value;
+  if (!text && state.heldFrame) return state.heldFrame.length;
+  const n = toUtf8(text).length;
   return estimateWiredBytes(n, keyed());
 }
 
+function overflowReason(): string | null {
+  if (state.io === "gpt") return null;
+  const cap = currentCap();
+  if (!cap) return null;
+  const used = payloadBytes();
+  if (used <= cap.payloadBytes) return null;
+  return `PAYLOAD ${used.toLocaleString()} B EXCEEDS CAPACITY ${cap.payloadBytes.toLocaleString()} B — RAISE BITS/CHANNEL, OPEN MORE CHANNELS, OR USE A LARGER CARRIER`;
+}
+
+function syncExportButton(): void {
+  const wrap = el("export-wrap");
+  const btn = el<HTMLButtonElement>("export");
+  const reason = overflowReason();
+  btn.disabled = uiBusy || Boolean(reason);
+  if (reason) {
+    wrap.dataset.tip = reason;
+    wrap.classList.add("blocked");
+  } else {
+    delete wrap.dataset.tip;
+    wrap.classList.remove("blocked");
+  }
+}
+
+function syncBinDownload(): void {
+  const btn = el<HTMLButtonElement>("bin-dl");
+  const show = Boolean(state.bin && state.binFromExtract);
+  btn.hidden = !show;
+  btn.disabled = uiBusy || !show;
+}
+
 function setBusy(busy: boolean): void {
-  for (const id of ["embed", "extract", "export", "wipe", "gpt-gen", "bin-save"]) {
+  uiBusy = busy;
+  for (const id of ["embed", "extract", "wipe", "gpt-gen"]) {
     el<HTMLButtonElement>(id).disabled = busy;
   }
+  syncExportButton();
+  syncBinDownload();
 }
 
 const MSG_PLACEHOLDER = "enter dead-drop text — embed writes LSBs, extract reads them back";
@@ -247,6 +323,8 @@ function refreshIntel(): void {
     link.textContent = "NO CARRIER";
     link.className = "link-state";
     el("payload-meta").textContent = ioMeta(used, wireNote);
+    syncExportButton();
+    syncBinDownload();
     return;
   }
 
@@ -286,13 +364,17 @@ function refreshIntel(): void {
     note.textContent = `${state.bits} LSBs will show banding — check LSB / DELTA`;
     note.className = "note warn";
   }
+
+  syncExportButton();
+  syncBinDownload();
 }
 
 async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   const box = el<HTMLTextAreaElement>("message");
   const direct = recoverFile(bytes);
   if (direct) {
-    armBinary(direct);
+    state.heldFrame = null;
+    armBinary(direct, true);
     applyIoMode("bin");
     setStatus(`${prefix} · FILE ${direct.name} · ${formatBytes(direct.bytes.length)} RAW`, "ok");
     return;
@@ -303,12 +385,14 @@ async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
       const plain = await cryptRaw("decrypt", cipherValue(), keyValue(), bytes);
       const packed = recoverFile(plain);
       if (packed) {
-        armBinary(packed);
+        state.heldFrame = null;
+        armBinary(packed, true);
         applyIoMode("bin");
         setStatus(`${prefix} · FILE ${packed.name} · ${formatBytes(packed.bytes.length)} RAW · DECRYPTED`, "ok");
         return;
       }
       const decoded = fromUtf8(plain);
+      state.heldFrame = null;
       clearBin();
       applyIoMode("msg");
       box.value = decoded.text;
@@ -321,44 +405,41 @@ async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
       );
       return;
     } catch (error) {
-      const decoded = fromUtf8(bytes);
-      applyIoMode("msg");
-      box.value = decoded.text;
-      refreshIntel();
       const detail = error instanceof Error ? error.message : "DECRYPT FAILED";
-      setStatus(`${prefix} · CIPHERTEXT HELD · ${detail}`, "err");
+      setStatus(`${prefix} · CIPHERTEXT HELD · ${cipherValue()} · ${detail}`, "err");
       return;
     }
   }
 
+  if (frameLooksKeyed(bytes)) {
+    setStatus(`${prefix} · OPENSSL BLOB — ENTER KEY AND EXTRACT`, "warn");
+    return;
+  }
+
   const decoded = fromUtf8(bytes);
+  if (decoded.binary) {
+    setStatus(`${prefix} · BINARY FRAME ${bytes.length} B — ENTER KEY AND EXTRACT IF IT WAS ENCRYPTED`, "warn");
+    return;
+  }
+  state.heldFrame = null;
   clearBin();
   applyIoMode(state.io === "gpt" ? "gpt" : "msg");
   box.value = decoded.text;
   refreshIntel();
-  if (looksLikeOpenssl(decoded.text)) {
-    setStatus(`${prefix} · OPENSSL BLOB — ENTER KEY AND EXTRACT`, "warn");
-    return;
-  }
-  setStatus(
-    decoded.binary ? `${prefix} · BINARY FRAME ${bytes.length} B (HEX)` : `${prefix} · ${bytes.length} B`,
-    "ok",
-  );
+  setStatus(`${prefix} · ${bytes.length} B`, "ok");
 }
 
 type PersistTarget = LibraryFolder | false;
 type ShelfResult = { name: string; skipped: boolean };
 
-function imageDataToBlob(image: ImageData): Promise<Blob> {
-  const off = document.createElement("canvas");
-  off.width = image.width;
-  off.height = image.height;
-  const offCtx = off.getContext("2d");
-  if (!offCtx) return Promise.reject(new Error("NO OFFSCREEN CONTEXT"));
-  offCtx.putImageData(image, 0, 0);
-  return new Promise((resolve, reject) => {
-    off.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("PNG ENCODE FAILED"))), "image/png");
-  });
+async function imageDataToBlob(image: ImageData): Promise<Blob> {
+  const text: Record<string, string> = {};
+  const cipher = cipherValue();
+  if (keyed() && cipher) text["dd-cipher"] = cipher;
+  const png = await encodePng(image, text);
+  const copy = new Uint8Array(png.byteLength);
+  copy.set(png);
+  return new Blob([copy], { type: "image/png" });
 }
 
 async function persistPng(folder: LibraryFolder, name: string, data: ImageData | Blob): Promise<ShelfResult | null> {
@@ -409,17 +490,18 @@ function detectFrame(image: ImageData): { payload: Uint8Array; cfg: StegConfig }
   return null;
 }
 
-async function ingest(image: ImageData, name: string, persist: PersistTarget = "source"): Promise<void> {
+async function ingest(image: ImageData, name: string, persist: PersistTarget = "source", pngBlob?: Blob): Promise<void> {
   state.name = name;
   viewCam.userMoved = false;
 
+  const found = detectFrame(image);
+  const dest: PersistTarget = persist && found ? "output" : persist;
   let shelved = "";
-  if (persist) {
-    const saved = await persistPng(persist, name, image);
-    shelved = shelfNote(persist, saved);
+  if (dest) {
+    const saved = await persistPng(dest, name, pngBlob ?? image);
+    shelved = shelfNote(dest, saved);
   }
 
-  const found = detectFrame(image);
   if (found) {
     if (found.cfg.bitsPerChannel !== state.bits) applyBits(found.cfg.bitsPerChannel);
     if (
@@ -435,17 +517,26 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
     }
     state.stego = image;
     state.original = stripFrame(image, found.payload.length, found.cfg);
+    state.heldFrame = found.payload;
+    el<HTMLTextAreaElement>("message").value = "";
+    clearBin();
+    applyIoMode("msg");
     setView("stego");
+    syncSizeControls(image.width, image.height);
     refreshView();
     refreshIntel();
-    await revealPayload(found.payload, `STEGO INGESTED · ${name}${shelved}`);
-    refreshIntel();
+    const hint = frameLooksKeyed(found.payload)
+      ? `OPENSSL FRAME · ${cipherValue() || "aes-256-cbc"} · ENTER KEY AND EXTRACT`
+      : "EXTRACT TO OPEN PAYLOAD";
+    setStatus(`STEGO INGESTED · ${name} · ${found.payload.length.toLocaleString()} B HELD · ${hint}${shelved}`, "ok");
     return;
   }
 
   state.original = image;
   state.stego = null;
+  state.heldFrame = null;
   setView("carrier");
+  syncSizeControls(image.width, image.height);
   refreshView();
   refreshIntel();
   setStatus(`CARRIER INGESTED · ${name} · CLEAN — NO DDRP FRAME${shelved}`, "ok");
@@ -477,7 +568,10 @@ async function bitmapFromBlob(blob: Blob): Promise<ImageBitmap> {
 async function ingestBlob(blob: Blob, name: string, persist: PersistTarget = "source"): Promise<void> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   if (isPngBytes(bytes)) {
-    await ingest(pngToImageData(await decodePng(bytes)), name, persist);
+    const decoded = await decodePng(bytes);
+    applyStoredCipher(decoded.text["dd-cipher"]);
+    const png = blob.type === "image/png" ? blob : new Blob([bytes], { type: "image/png" });
+    await ingest(pngToImageData(decoded), name, persist, png);
     return;
   }
   const bitmap = await bitmapFromBlob(new Blob([bytes], { type: blob.type || "application/octet-stream" }));
@@ -516,17 +610,21 @@ async function onEmbed(): Promise<void> {
   }
   try {
     if (state.io === "bin" && !state.bin) {
-      setStatus("NO BINARY ARMED", "err");
+      setStatus("NO BINARY ARMED — USE BIN → LOAD BINARY (CARRIER LOCAL FILE REPLACES THE PICTURE)", "err");
       return;
     }
     setBusy(true);
     let payload: Uint8Array;
-    if (state.io === "bin" && state.bin) {
-      payload = state.bin.envelope;
+    const filePayload = state.bin;
+    if (filePayload) {
+      payload = filePayload.envelope;
       if (keyed()) {
         setStatus(`ENCRYPTING ${cipherValue()} …`);
         payload = await cryptRaw("encrypt", cipherValue(), keyValue(), payload);
       }
+    } else if (state.io === "bin") {
+      setStatus("NO BINARY ARMED", "err");
+      return;
     } else {
       let wire = el<HTMLTextAreaElement>("message").value;
       if (keyed()) {
@@ -536,10 +634,11 @@ async function onEmbed(): Promise<void> {
       payload = toUtf8(wire);
     }
     state.stego = embed(state.original, payload, config());
+    state.heldFrame = null;
     setView("stego");
     refreshView();
     refreshIntel();
-    const pipe = keyed() ? ` · ${cipherValue()}` : state.io === "bin" ? " · DDFILE RAW" : "";
+    const pipe = keyed() ? ` · ${cipherValue()}` : filePayload ? " · DDFILE RAW" : "";
     const stem = state.name.replace(/\.[^.]+$/, "") || "deaddrop";
     const saved = state.stego ? await persistPng("output", `${stem}.stego.png`, state.stego) : null;
     setStatus(
@@ -590,11 +689,13 @@ function clearBin(): void {
   if (state.binUrl) URL.revokeObjectURL(state.binUrl);
   state.bin = null;
   state.binUrl = "";
+  state.binFromExtract = false;
   hideBinPreview();
   const dump = el("bin-dump");
   dump.textContent = "";
   dump.hidden = true;
   el("bin-info").textContent = "NO FILE ARMED — AUDIO, PDF, ZIP…";
+  syncBinDownload();
 }
 
 function hideBinPreview(): void {
@@ -603,7 +704,10 @@ function hideBinPreview(): void {
   audio.removeAttribute("src");
   audio.hidden = true;
   const image = el<HTMLImageElement>("bin-image");
+  image.onload = null;
+  image.onerror = null;
   image.removeAttribute("src");
+  image.alt = "";
   image.hidden = true;
   const video = el<HTMLVideoElement>("bin-video");
   video.pause();
@@ -625,11 +729,15 @@ function refreshBinInfo(): void {
   el("bin-info").textContent = `${state.bin.name}  ·  RAW ${formatBytes(state.bin.bytes.length)}  →  ${formatBytes(wire)} IN IMAGE${over ? "  OVER SLOT" : ""}`;
 }
 
-function armBinary(packed: PackedFile): void {
+function armBinary(packed: PackedFile, fromExtract = false): void {
   if (state.binUrl) URL.revokeObjectURL(state.binUrl);
+  const mime = sniffMime(packed.bytes) || packed.mime;
+  packed = mime === packed.mime ? packed : { ...packed, mime };
   state.bin = packed;
+  state.binFromExtract = fromExtract;
   state.binUrl = URL.createObjectURL(blobFromBytes(packed.bytes, packed.mime));
   refreshBinInfo();
+  syncBinDownload();
   const dumpNode = el("bin-dump");
   dumpNode.textContent = dumpEnvelope(packed);
   dumpNode.hidden = false;
@@ -641,8 +749,11 @@ function armBinary(packed: PackedFile): void {
     audio.hidden = false;
   } else if (isImage(packed.mime)) {
     const image = el<HTMLImageElement>("bin-image");
+    image.alt = packed.name;
     image.src = url;
     image.hidden = false;
+    image.onload = () => setStatus(`IMAGE PAYLOAD · ${packed.name} · ${image.naturalWidth}×${image.naturalHeight}`, "ok");
+    image.onerror = () => setStatus(`IMAGE PAYLOAD LOADED AS BYTES BUT PREVIEW FAILED · ${packed.name}`, "warn");
   } else if (isVideo(packed.mime)) {
     const video = el<HTMLVideoElement>("bin-video");
     video.src = url;
@@ -715,6 +826,11 @@ async function onGptGen(): Promise<void> {
 }
 
 async function onExport(): Promise<void> {
+  const blocked = overflowReason();
+  if (blocked) {
+    setStatus(blocked, "err");
+    return;
+  }
   const source = state.stego ?? state.original;
   if (!source) {
     setStatus("NO CARRIER", "err");
@@ -738,6 +854,7 @@ async function onExport(): Promise<void> {
 function onWipe(): void {
   if (!state.original) return;
   state.stego = null;
+  state.heldFrame = null;
   setView("carrier");
   el<HTMLTextAreaElement>("message").value = "";
   clearBin();
@@ -875,10 +992,13 @@ async function loadCipherSelect(): Promise<void> {
       }
       select.append(og);
     }
-    select.value = "aes-256-cbc";
+    select.value = pendingCipher || localStorage.getItem(CIPHER_STORE) || "aes-256-cbc";
+    if (!select.value) select.value = "aes-256-cbc";
     if (!select.value && select.options.length > 0) {
       select.selectedIndex = 0;
     }
+    pendingCipher = "";
+    rememberCipher();
     refreshPipe();
   } catch {
     select.replaceChildren();
@@ -920,6 +1040,13 @@ function refreshSynthTarget(): void {
   node.textContent = `TARGET ${formatBytes(cap.payloadBytes)} @ ${size.width}×${size.height}`;
 }
 
+function syncSizeControls(width: number, height: number): void {
+  el<HTMLInputElement>("synth-w").value = String(width);
+  el<HTMLInputElement>("synth-h").value = String(height);
+  matchPreset();
+  refreshSynthTarget();
+}
+
 function runSynth(persist: PersistTarget = "source"): void {
   const size = peekSynthSize();
   if (!size) {
@@ -955,10 +1082,7 @@ function snapCurrentSize(): void {
     setStatus("NO CARRIER", "err");
     return;
   }
-  el<HTMLInputElement>("synth-w").value = String(state.original.width);
-  el<HTMLInputElement>("synth-h").value = String(state.original.height);
-  matchPreset();
-  refreshSynthTarget();
+  syncSizeControls(state.original.width, state.original.height);
   setStatus(`SNAPPED W×H TO ${state.original.width}×${state.original.height}`, "ok");
 }
 
@@ -1041,7 +1165,7 @@ function wireUi(): void {
   el("embed").addEventListener("click", () => void onEmbed());
   el("extract").addEventListener("click", () => void onExtract());
   el("gpt-gen").addEventListener("click", () => void onGptGen());
-  el("bin-save").addEventListener("click", saveBinary);
+  el("bin-dl").addEventListener("click", saveBinary);
   el("export").addEventListener("click", () => void onExport());
   el("wipe").addEventListener("click", onWipe);
 
@@ -1068,9 +1192,21 @@ function wireUi(): void {
     });
   });
 
-  const onCryptoChange = () => refreshIntel();
+  const onCryptoChange = () => {
+    rememberCipher();
+    refreshIntel();
+  };
   el("key").addEventListener("input", onCryptoChange);
   el("cipher").addEventListener("change", onCryptoChange);
+  el("key-vis").addEventListener("click", () => {
+    const input = el<HTMLInputElement>("key");
+    const btn = el<HTMLButtonElement>("key-vis");
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    btn.setAttribute("aria-pressed", show ? "true" : "false");
+    btn.setAttribute("aria-label", show ? "Hide key" : "Show key");
+    btn.title = show ? "Hide key" : "Show key";
+  });
 
   el<HTMLTextAreaElement>("message").addEventListener("input", () => {
     refreshIntel();

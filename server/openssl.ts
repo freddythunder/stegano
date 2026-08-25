@@ -1,5 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -16,7 +19,9 @@ export type CipherCatalog = {
 };
 
 const CIPHER_ID = /^[a-z][a-z0-9-]{0,40}$/;
-const MAX_TEXT = 1_500_000;
+const MAX_TEXT = 20_000_000;
+const SALTED_BIN = Buffer.from("Salted__");
+const SALTED_B64 = "U2FsdGVkX1";
 const FAMILY_ORDER = [
   "AES",
   "CHACHA",
@@ -107,27 +112,57 @@ export async function loadCatalog(): Promise<CipherCatalog> {
   return catalogPromise;
 }
 
-function runOpenssl(args: string[], input: Buffer, envExtra: Record<string, string>): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("openssl", args, {
-      env: { ...process.env, ...envExtra },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(Buffer.concat(stdout));
-        return;
-      }
-      const err = Buffer.concat(stderr).toString("utf8").trim() || `openssl exited ${code}`;
-      reject(new Error(err.split("\n")[0]));
-    });
-    child.stdin.end(input);
+function tidyOpensslError(err: string): string {
+  const low = err.toLowerCase();
+  if (low.includes("error reading input file") || low.includes("bad magic number") || low.includes("bad decrypt")) {
+    return "BAD DECRYPT — WRONG KEY, CIPHER, OR CORRUPT FRAME";
+  }
+  return err;
+}
+
+function looksSaltedBinary(input: Buffer): boolean {
+  return input.length >= 16 && input.subarray(0, 8).equals(SALTED_BIN);
+}
+
+function looksSaltedB64(input: Buffer): boolean {
+  const head = input.subarray(0, 24).toString("latin1").replace(/\s+/g, "");
+  return head.startsWith(SALTED_B64);
+}
+
+function ignorePipeError(stream: NodeJS.ReadableStream | NodeJS.WritableStream | null): void {
+  stream?.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE" || error.code === "ECONNRESET") return;
   });
+}
+
+async function runOpenssl(args: string[], input: Buffer, envExtra: Record<string, string>): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), "dd-crypt-"));
+  const inPath = join(dir, "in.bin");
+  const outPath = join(dir, "out.bin");
+  try {
+    await writeFile(inPath, input);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("openssl", [...args, "-in", inPath, "-out", outPath], {
+        env: { ...process.env, ...envExtra },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const stderr: Buffer[] = [];
+      ignorePipeError(child.stderr);
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const err = Buffer.concat(stderr).toString("utf8").trim() || `openssl exited ${code}`;
+        reject(new Error(tidyOpensslError(err.split("\n")[0])));
+      });
+    });
+    return await readFile(outPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 export async function crypt(
@@ -145,12 +180,20 @@ export async function crypt(
   if (input.length > MAX_TEXT) throw new Error("TEXT TOO LONG");
 
   const token = `DD_PASS_${randomBytes(8).toString("hex")}`;
+  let payload = Buffer.from(input);
+  const useArmor = op === "encrypt" || looksSaltedB64(payload);
+  if (op === "decrypt") {
+    if (looksSaltedB64(payload)) {
+      payload = Buffer.from(payload.toString("latin1").replace(/\s+/g, ""), "latin1");
+    } else if (!looksSaltedBinary(payload)) {
+      throw new Error("NOT OPENSSL CIPHERTEXT — FRAME MAY BE CORRUPT (NEED A FRESH EMBED)");
+    }
+  }
   const args = [
     "enc",
     `-${cipher}`,
     op === "encrypt" ? "-e" : "-d",
-    "-a",
-    "-A",
+    ...(useArmor ? (["-a", "-A"] as const) : []),
     "-pbkdf2",
     "-iter",
     "10000",
@@ -162,7 +205,7 @@ export async function crypt(
     "default",
   ];
 
-  const output = await runOpenssl(args, Buffer.from(input), { [token]: key });
+  const output = await runOpenssl(args, payload, { [token]: key });
   if (op === "decrypt" && output.length === 0 && input.length > 0) {
     throw new Error("DECRYPT PRODUCED EMPTY OUTPUT");
   }

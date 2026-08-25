@@ -2,6 +2,7 @@ export type DecodedPng = {
   width: number;
   height: number;
   rgba: Uint8Array;
+  text: Record<string, string>;
 };
 
 const PNG_MAGIC = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -36,6 +37,46 @@ async function inflateZlib(data: Uint8Array): Promise<Uint8Array> {
   copy.set(data);
   const stream = new Blob([copy]).stream().pipeThrough(new DecompressionStream("deflate"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function deflateZlib(data: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const stream = new Blob([copy]).stream().pipeThrough(new CompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 255] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function writeU32(bytes: Uint8Array, offset: number, value: number): void {
+  bytes[offset] = (value >>> 24) & 255;
+  bytes[offset + 1] = (value >>> 16) & 255;
+  bytes[offset + 2] = (value >>> 8) & 255;
+  bytes[offset + 3] = value & 255;
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const chunk = new Uint8Array(12 + data.length);
+  writeU32(chunk, 0, data.length);
+  for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
+  chunk.set(data, 8);
+  const crcSrc = chunk.subarray(4, 8 + data.length);
+  writeU32(chunk, 8 + data.length, crc32(crcSrc));
+  return chunk;
 }
 
 function unfilter(raw: Uint8Array, width: number, height: number, bpp: number): Uint8Array {
@@ -128,6 +169,7 @@ export async function decodePng(png: Uint8Array): Promise<DecodedPng> {
   let colorType = 0;
   let interlace = 0;
   const idat: Uint8Array[] = [];
+  const text: Record<string, string> = {};
   while (offset + 8 <= png.length) {
     const len = u32(png, offset);
     const type = ascii(png, offset + 4, 4);
@@ -141,6 +183,11 @@ export async function decodePng(png: Uint8Array): Promise<DecodedPng> {
       interlace = data[12] ?? 0;
     } else if (type === "IDAT") {
       idat.push(data);
+    } else if (type === "tEXt") {
+      const z = data.indexOf(0);
+      if (z > 0) {
+        text[ascii(data, 0, z)] = ascii(data, z + 1, data.length - z - 1);
+      }
     } else if (type === "IEND") {
       break;
     }
@@ -161,11 +208,51 @@ export async function decodePng(png: Uint8Array): Promise<DecodedPng> {
   const expected = height * (1 + width * bpp);
   if (raw.length < expected) throw new Error("PNG DATA SHORT");
   const filtered = unfilter(raw.subarray(0, expected), width, height, bpp);
-  return { width, height, rgba: toRgba(filtered, width, height, colorType) };
+  return { width, height, rgba: toRgba(filtered, width, height, colorType), text };
 }
 
 export function pngToImageData(decoded: DecodedPng): ImageData {
   const data = new Uint8ClampedArray(decoded.rgba.length);
   data.set(decoded.rgba);
   return new ImageData(data, decoded.width, decoded.height);
+}
+
+function textChunk(keyword: string, value: string): Uint8Array | null {
+  if (!keyword || keyword.length > 79 || /[\0\r\n]/.test(keyword) || value.includes("\0")) return null;
+  const payload = new Uint8Array(keyword.length + 1 + value.length);
+  for (let i = 0; i < keyword.length; i++) payload[i] = keyword.charCodeAt(i) & 255;
+  payload[keyword.length] = 0;
+  for (let i = 0; i < value.length; i++) payload[keyword.length + 1 + i] = value.charCodeAt(i) & 255;
+  return pngChunk("tEXt", payload);
+}
+
+export async function encodePng(image: ImageData, text: Record<string, string> = {}): Promise<Uint8Array> {
+  const { width, height, data } = image;
+  const stride = width * 4;
+  const raw = new Uint8Array(height * (1 + stride));
+  for (let y = 0; y < height; y++) {
+    const row = y * (1 + stride);
+    raw[row] = 0;
+    raw.set(data.subarray(y * stride, y * stride + stride), row + 1);
+  }
+  const ihdr = new Uint8Array(13);
+  writeU32(ihdr, 0, width);
+  writeU32(ihdr, 4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const idat = await deflateZlib(raw);
+  const parts = [PNG_MAGIC, pngChunk("IHDR", ihdr)];
+  for (const [keyword, value] of Object.entries(text)) {
+    const chunk = textChunk(keyword, value);
+    if (chunk) parts.push(chunk);
+  }
+  parts.push(pngChunk("IDAT", idat), pngChunk("IEND", new Uint8Array(0)));
+  const total = parts.reduce((n, part) => n + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
 }

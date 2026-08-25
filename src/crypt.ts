@@ -56,11 +56,16 @@ export async function requestGptImage(
 }
 
 export async function crypt(op: "encrypt" | "decrypt", cipher: string, key: string, text: string): Promise<string> {
-  const response = await fetch("/api/crypt", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ op, cipher, key, text }),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/crypt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op, cipher, key, text }),
+    });
+  } catch {
+    throw new Error("CRYPT PIPE OFFLINE — RESTART npm run dev AND EXTRACT AGAIN");
+  }
   const body = (await response.json()) as { text?: string; error?: string };
   if (!response.ok || typeof body.text !== "string") {
     throw new Error(body.error || "CRYPT FAILED");
@@ -74,11 +79,16 @@ export async function cryptRaw(
   key: string,
   data: Uint8Array,
 ): Promise<Uint8Array> {
-  const response = await fetch("/api/crypt", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ op, cipher, key, bin: bytesToB64(data) }),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/crypt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op, cipher, key, bin: bytesToB64(data) }),
+    });
+  } catch {
+    throw new Error("CRYPT PIPE OFFLINE — RESTART npm run dev AND EXTRACT AGAIN");
+  }
   const body = (await response.json()) as { bin?: string; error?: string };
   if (!response.ok || typeof body.bin !== "string") {
     throw new Error(body.error || "CRYPT FAILED");
