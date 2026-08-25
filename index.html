@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>DEAD DROP // LSB TERMINAL</title>
+    <style>
+      html {
+        color-scheme: dark;
+        background: #070908;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #070908;
+        color: #c6e7cc;
+      }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Share+Tech+Mono&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="crt" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark">▣</span>
+          <div>
+            <h1>DEAD DROP</h1>
+            <p class="codename">DD-LSB / PNG CARRIER TERMINAL</p>
+          </div>
+        </div>
+        <div class="classification">UNCLASSIFIED // TRAINING</div>
+        <div class="top-actions">
+          <button type="button" id="lib-open" class="info-btn">LIB</button>
+          <button type="button" id="info-open" class="info-btn">INFO</button>
+          <div class="clock-block">
+            <div id="clock" class="clock">00:00:00</div>
+            <div id="session" class="session">SESSION --</div>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="panel viewport-panel" aria-label="Carrier image">
+          <div class="panel-head">
+            <span class="tag">01</span>
+            <h2>CARRIER</h2>
+            <div class="view-chrome">
+              <div class="view-tools">
+                <button type="button" id="view-fit">FIT</button>
+                <button type="button" id="view-out" aria-label="Zoom out">−</button>
+                <button type="button" id="view-in" aria-label="Zoom in">+</button>
+                <span id="view-zoom" class="view-zoom">100%</span>
+              </div>
+              <div class="view-switch" role="tablist" aria-label="Image view">
+                <button type="button" data-view="carrier" class="active">SRC</button>
+                <button type="button" data-view="stego">STEGO</button>
+                <button type="button" data-view="lsb">LSB</button>
+                <button type="button" data-view="delta">DELTA</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel-body viewport-body">
+            <div id="dropzone" class="dropzone">
+              <canvas id="stage" width="768" height="512"></canvas>
+              <div id="empty" class="empty-hint">
+                <p>DROP IMAGE // FILE // CLIPBOARD</p>
+                <p class="dim">PNG preferred. JPEG/WebP accepted, export is always PNG.</p>
+              </div>
+            </div>
+            <div class="ingress">
+              <label class="file-btn">
+                <input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/*" />
+                LOCAL FILE
+              </label>
+              <form id="url-form" class="url-form">
+                <input
+                  id="url"
+                  type="url"
+                  placeholder="https://… carrier URL"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <button type="submit">PULL</button>
+              </form>
+            </div>
+            <div class="synth-bar">
+              <label class="dim-field">
+                <span>W</span>
+                <input id="synth-w" type="number" min="16" max="4096" step="1" value="768" />
+              </label>
+              <span class="dim-x" aria-hidden="true">×</span>
+              <label class="dim-field">
+                <span>H</span>
+                <input id="synth-h" type="number" min="16" max="4096" step="1" value="512" />
+              </label>
+              <select id="synth-preset" aria-label="Synth size preset">
+                <option value="32x32">32×32</option>
+                <option value="64x64">64×64</option>
+                <option value="128x128">128×128</option>
+                <option value="256x256">256×256</option>
+                <option value="640x480">640×480</option>
+                <option value="768x512" selected>768×512</option>
+                <option value="1280x720">1280×720</option>
+                <option value="1920x1080">1920×1080</option>
+                <option value="custom">CUSTOM</option>
+              </select>
+              <button type="button" id="gen">SYNTH SAT</button>
+              <button type="button" id="snap-size">SNAP</button>
+              <button type="button" id="resize">RESIZE</button>
+              <span id="synth-target" class="synth-target">—</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel intel-panel" aria-label="Capacity and stats">
+          <div class="panel-head">
+            <span class="tag">02</span>
+            <h2>INTEL</h2>
+            <span id="link-state" class="link-state">NO CARRIER</span>
+          </div>
+          <div class="panel-body intel-body">
+            <div class="capacity-hero">
+              <div class="hero-label">PAYLOAD CAPACITY</div>
+              <div id="cap-bytes" class="hero-value">—</div>
+              <div id="cap-sub" class="hero-sub">awaiting carrier</div>
+              <div class="meter" aria-label="Payload utilization">
+                <div id="meter-fill" class="meter-fill"></div>
+              </div>
+              <div id="util-label" class="util-label">UTIL 0%</div>
+            </div>
+
+            <dl class="stats" id="stats">
+              <div><dt>RES</dt><dd id="st-res">—</dd></div>
+              <div><dt>PIXELS</dt><dd id="st-px">—</dd></div>
+              <div><dt>BPP</dt><dd id="st-bpp">—</dd></div>
+              <div><dt>BITS</dt><dd id="st-bits">—</dd></div>
+              <div><dt>HEADER</dt><dd id="st-hdr">8 B  DDRP+LEN</dd></div>
+              <div><dt>USED</dt><dd id="st-used">—</dd></div>
+            </dl>
+
+            <div class="controls">
+              <div class="ctrl-block">
+                <span class="ctrl-label">BITS / CHANNEL</span>
+                <div class="seg" id="bits-seg">
+                  <button type="button" data-bits="1" class="active">1</button>
+                  <button type="button" data-bits="2">2</button>
+                  <button type="button" data-bits="3">3</button>
+                  <button type="button" data-bits="4">4</button>
+                </div>
+                <p id="artifact-note" class="note">1 LSB ≈ invisible on PNG</p>
+              </div>
+              <div class="ctrl-block">
+                <span class="ctrl-label">CHANNELS</span>
+                <div class="seg channels" id="ch-seg">
+                  <button type="button" data-ch="r" class="active">R</button>
+                  <button type="button" data-ch="g" class="active">G</button>
+                  <button type="button" data-ch="b" class="active">B</button>
+                </div>
+                <p class="note">Alpha is never touched</p>
+              </div>
+            </div>
+
+            <pre id="proto" class="proto">FRAME  DDRP · u32be LEN · UTF-8 PAYLOAD
+WALK   L→R, T→B · RGB LSBs, MSB-first bits
+PIPE   TEXT → LSB  (set a key to encrypt first)
+MATCH  extract bits/channels/cipher/key must match embed</pre>
+          </div>
+        </section>
+
+        <section id="payload-panel" class="panel payload-panel" data-mode="msg" aria-label="Hidden message">
+          <div class="panel-head">
+            <span class="tag">03</span>
+            <h2 id="payload-title">PAYLOAD</h2>
+            <div class="io-mode" id="io-mode" role="tablist" aria-label="Input mode">
+              <button type="button" data-mode="msg" class="active">MSG</button>
+              <button type="button" data-mode="bin">BIN</button>
+              <button type="button" data-mode="gpt">GPT</button>
+            </div>
+            <span id="payload-meta" class="payload-meta">0 B</span>
+            <div class="payload-actions">
+              <button type="button" id="embed" class="primary">EMBED</button>
+              <button type="button" id="extract">EXTRACT</button>
+              <button type="button" id="gpt-gen" class="primary">GPT GEN</button>
+              <button type="button" id="bin-save">SAVE FILE</button>
+              <button type="button" id="export">EXPORT PNG</button>
+              <button type="button" id="wipe">WIPE</button>
+            </div>
+          </div>
+          <div class="panel-body payload-body">
+            <div class="crypto-bar">
+              <label class="crypto-field">
+                <span>CIPHER</span>
+                <select id="cipher" aria-label="OpenSSL cipher"></select>
+              </label>
+              <label class="crypto-field key-field">
+                <span>KEY</span>
+                <input
+                  id="key"
+                  type="password"
+                  placeholder="optional — empty keeps cleartext"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </label>
+              <div id="pipe-label" class="pipe">TEXT → LSB</div>
+            </div>
+            <label class="sr-only" for="message">Hidden message</label>
+            <textarea
+              id="message"
+              spellcheck="false"
+              placeholder="enter dead-drop text — embed writes LSBs, extract reads them back"
+            ></textarea>
+            <div id="bin-pane" class="bin-pane">
+              <div class="bin-row">
+                <label class="file-btn">
+                  <input id="bin-file" type="file" />
+                  LOAD BINARY
+                </label>
+                <span id="bin-info" class="bin-info">NO FILE ARMED — AUDIO, PDF, ZIP…</span>
+              </div>
+              <audio id="bin-audio" class="bin-audio" controls hidden></audio>
+              <p class="bin-note">
+                PIPE: FILE → LSB (raw bytes). A small DDFILE header is the only extra. Short clips fit a
+                768×512 / 1 LSB carrier; bump W×H or bits/channel for larger files.
+              </p>
+            </div>
+            <div id="status" class="status" role="status">STANDBY // LOAD A CARRIER TO BEGIN</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="info-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="info-title"
+        tabindex="-1"
+      >
+        <header class="modal-head">
+          <span class="tag">00</span>
+          <h2 id="info-title">FIELD MANUAL</h2>
+          <button type="button" id="info-close">CLOSE</button>
+        </header>
+        <div class="modal-body">
+          <section>
+            <h3>WHAT THIS IS</h3>
+            <p>
+              A lab for <strong>LSB steganography</strong> in PNG pixels. The least significant bits of R/G/B
+              hold a tiny payload. At 1 bit/channel a photo looks unchanged. This is for learning — not a
+              covert-comms kit.
+            </p>
+          </section>
+          <section>
+            <h3>CARRIER</h3>
+            <p>
+              Drag to pan, mouse wheel to zoom (pixelates past 150% so you can inspect LSBs). <strong>FIT</strong> frames
+              the carrier. <strong>SNAP</strong> copies the current pixel size into W×H; <strong>RESIZE</strong> resamples
+              the loaded carrier to that size (this destroys any embedded payload). Set <strong>W × H</strong>
+              (16–4096) before SYNTH SAT or GPT GEN. JPEG/WebP are accepted as input; export is always lossless PNG.
+              Remote URLs often fail CORS — save locally if PULL is blocked.
+            </p>
+          </section>
+          <section>
+            <h3>VIEWS</h3>
+            <p>
+              <strong>SRC</strong> original · <strong>STEGO</strong> after embed · <strong>LSB</strong> amplified
+              bit-plane · <strong>DELTA</strong> original vs stego (needs an embed). Raise bits/channel and
+              watch LSB/DELTA light up.
+            </p>
+          </section>
+          <section>
+            <h3>GPT CARRIER</h3>
+            <p>
+              Toggle <strong>GPT</strong> on the payload strip. The box becomes a prompt. <strong>GPT GEN</strong>
+              calls OpenAI <code>gpt-image-1</code> with the key from the local <code>[stegano]</code> creds block
+              (server-side only). Photos with grain and detail hide LSBs better than flat graphics. After it lands,
+              switch back to <strong>MSG</strong> and type the payload to embed.
+            </p>
+          </section>
+          <section>
+            <h3>BINARY / AUDIO</h3>
+            <p>
+              Toggle <strong>BIN</strong>, load any file (wav, mp3, pdf, zip…). A tiny <code>DDFILE</code> header
+              plus the <strong>raw bytes</strong> go into the LSBs — no Base64 on the file itself (UTF-8 is only
+              for text messages). Extract restores the original bytes. A key encrypts those bytes with OpenSSL
+              first. Scaling the carrier after embed will destroy the file.
+            </p>
+          </section>
+          <section>
+            <h3>PAYLOAD PIPE</h3>
+            <p>No key: <code>TEXT → LSB</code> or <code>FILE → LSB</code>.</p>
+            <p>With a key: <code>… → openssl enc → LSB</code> (OpenSSL’s own Base64 is only on the ciphertext).</p>
+            <p>
+              The frame prefix is <code>DDRP</code> + 32-bit length, then raw payload bytes, walking
+              pixels left-to-right, top-to-bottom. Extract must use the same bits, channels, cipher, and key.
+            </p>
+          </section>
+          <section>
+            <h3>OPENSSL</h3>
+            <p>
+              Ciphers come from <code>openssl enc -ciphers</code> on this machine. Key wrapping modes are
+              omitted (they are not for arbitrary text). Legacy toys (DES, RC4, Blowfish…) load via the
+              OpenSSL 3 legacy provider. Default KDF: <code>-pbkdf2 -iter 10000</code>, Base64 with
+              <code>-a -A</code> (no line wraps).
+            </p>
+            <pre>printf '%s' 'hello' | openssl enc -aes-256-cbc -e -a -A -pbkdf2 -pass pass:KEY
+openssl enc -aes-256-cbc -d -a -A -pbkdf2 -pass pass:KEY</pre>
+            <p>
+              ECB and RC4 are in the list so you can see why they are poor choices. Prefer AES-*-CBC/CTR or
+              ChaCha20 for the lab default.
+            </p>
+          </section>
+          <section>
+            <h3>LIBRARY</h3>
+            <p>
+              Carriers land in <code>images/source/</code> (GPT working size, SYNTH, local/URL loads, resizes).
+              Stego frames land in <code>images/output/</code> on EMBED. A second save with the same name,
+              pixel size, and payload is skipped. Open <strong>LIB</strong> to browse either reel and click a
+              still to load it. Scratch files you plan to hide live in <code>payloads/</code>.
+            </p>
+          </section>
+          <section>
+            <h3>KEEP IT</h3>
+            <p>
+              Embed writes <code>images/output/</code>. <strong>EXPORT PNG</strong> only downloads — it does not
+              make a second copy. Reload from LIB, set the same cipher/key, and EXTRACT. WIPE restores the
+              carrier and clears the message (not the key).
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div id="lib-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="lib"></div>
+      <div
+        class="modal-card lib-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lib-title"
+        tabindex="-1"
+      >
+        <header class="modal-head">
+          <span class="tag">04</span>
+          <h2 id="lib-title">FILM LIBRARY</h2>
+          <div class="lib-tabs" role="tablist" aria-label="Library folder">
+            <button type="button" data-lib="source" class="active">SOURCE</button>
+            <button type="button" data-lib="output">OUTPUT</button>
+          </div>
+          <span id="lib-count" class="lib-count">—</span>
+          <button type="button" id="lib-close">CLOSE</button>
+        </header>
+        <div class="modal-body">
+          <p class="lib-lead">
+            SOURCE holds carriers. OUTPUT holds stego PNGs. Click a frame to load it as the working carrier.
+          </p>
+          <div id="lib-grid" class="lib-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
