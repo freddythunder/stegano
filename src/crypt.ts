@@ -10,15 +10,23 @@ export type CipherCatalog = {
 };
 
 const SALTED_B64 = "U2FsdGVkX1";
+const SALTED_BIN = new TextEncoder().encode("Salted__");
 
 export function looksLikeOpenssl(text: string): boolean {
   return text.trimStart().startsWith(SALTED_B64);
 }
 
+export function looksLikeOpensslBytes(bytes: Uint8Array): boolean {
+  if (bytes.length >= SALTED_BIN.length && SALTED_BIN.every((value, i) => bytes[i] === value)) return true;
+  const n = Math.min(bytes.length, 16);
+  let head = "";
+  for (let i = 0; i < n; i++) head += String.fromCharCode(bytes[i] ?? 0);
+  return looksLikeOpenssl(head);
+}
+
 export function estimateWiredBytes(plainBytes: number, keyed: boolean): number {
   if (!keyed) return plainBytes;
-  const binary = 16 + plainBytes + 16;
-  return Math.ceil(binary / 3) * 4;
+  return 16 + Math.ceil(plainBytes / 16) * 16;
 }
 
 export async function fetchCiphers(): Promise<CipherCatalog> {

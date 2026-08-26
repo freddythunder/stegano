@@ -1,4 +1,4 @@
-import { capacity, embed, extract, stripFrame, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
+import { capacity, embed, extract, permuteIndex, stripFrame, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
 import { decodePng, encodePng, pngToImageData } from "./png.ts";
 import { crypt as opensslCrypt } from "../server/openssl.ts";
 
@@ -51,7 +51,7 @@ for (const config of configs) {
   assert(!decoded.binary, "should be utf8");
   assert(decoded.text === message, `roundtrip mismatch for ${JSON.stringify(config)}`);
   assert(source.data[3] === 255 && stego.data[3] === 255, "alpha must stay opaque");
-  const clean = stripFrame(stego, payload.length, config);
+  const clean = stripFrame(stego, config);
   try {
     extract(clean, config);
     throw new Error("stripped carrier should have no frame");
@@ -93,6 +93,34 @@ try {
 }
 
 {
+  for (const n of [2, 3, 16, 17, 1000, 7777]) {
+    const seed = 0xdecafbad;
+    const seen = new Set<number>();
+    for (let i = 0; i < n; i++) {
+      const p = permuteIndex(i, n, seed);
+      assert(p >= 0 && p < n, `permute range ${n}`);
+      assert(!seen.has(p), `permute unique ${n}`);
+      seen.add(p);
+    }
+    assert(seen.size === n, `permute covers ${n}`);
+  }
+}
+
+{
+  const config = configs[0];
+  const source = makeCarrier(64, 48);
+  const a = embed(source, payload, config, 1);
+  const b = embed(source, payload, config, 2);
+  let differ = 0;
+  for (let i = 0; i < a.data.length; i += 4) {
+    if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2]) differ += 1;
+  }
+  assert(differ > 0, "different seeds must scatter differently");
+  assert(fromUtf8(extract(a, config)).text === message, "seed 1 extract");
+  assert(fromUtf8(extract(b, config)).text === message, "seed 2 extract");
+}
+
+{
   const config: StegConfig = { bitsPerChannel: 1, channels: { r: true, g: true, b: true } };
   const raw = new Uint8Array(2048);
   raw[0] = 0xff;
@@ -103,6 +131,7 @@ try {
   envelope.set(header);
   envelope.set(raw, header.length);
   const enc = await opensslCrypt("encrypt", "aes-256-cbc", "secret-key", envelope);
+  assert(new TextDecoder().decode(enc.subarray(0, 8)) === "Salted__", "raw openssl ciphertext");
   const stego = embed(makeCarrier(160, 120), enc, config);
   const png = await encodePng(stego, { "dd-cipher": "aes-256-cbc" });
   const pulled = extract(pngToImageData(await decodePng(png)), config);

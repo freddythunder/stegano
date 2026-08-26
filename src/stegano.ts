@@ -1,7 +1,9 @@
-/** Dead Drop frame: magic + payload length, then UTF-8 bytes in pixel LSBs. */
+/** Dead Drop frame: sequential header, then payload bits scattered by a seeded permutation. */
 
-export const MAGIC = new TextEncoder().encode("DDRP");
-export const HEADER_BYTES = 8;
+export const MAGIC = new TextEncoder().encode("DDRS");
+export const MAGIC_LEGACY = new TextEncoder().encode("DDRP");
+export const HEADER_BYTES = 12;
+const HEADER_LEGACY_BYTES = 8;
 
 export type BitsPerChannel = 1 | 2 | 3 | 4;
 
@@ -162,6 +164,129 @@ function cursorFor(image: PixelRaster, config: StegConfig): LsbCursor {
   );
 }
 
+function hash32(x: number, seed: number, round: number): number {
+  let h = Math.imul(x ^ seed ^ Math.imul(round + 1, 0x9e3779b9), 0x7feb352d);
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+/** Cycle-walking Feistel: bijection on 0..n-1 without storing a shuffle table. */
+export function permuteIndex(i: number, n: number, seed: number): number {
+  if (n <= 1) return 0;
+  let bits = Math.ceil(Math.log2(n));
+  if (bits < 2) bits = 2;
+  if (bits & 1) bits += 1;
+  const half = bits / 2;
+  const mask = (1 << half) - 1;
+  let x = i >>> 0;
+  do {
+    let l = x >>> half;
+    let r = x & mask;
+    for (let round = 0; round < 6; round++) {
+      const f = hash32(r, seed, round) & mask;
+      const nl = r;
+      const nr = (l ^ f) & mask;
+      l = nl;
+      r = nr;
+    }
+    x = ((l << half) | r) >>> 0;
+  } while (x >= n);
+  return x;
+}
+
+function writeSlot(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  channels: number[],
+  bitsPerChannel: number,
+  slot: number,
+  value: 0 | 1,
+): void {
+  const bpp = channels.length * bitsPerChannel;
+  const pixel = (slot / bpp) | 0;
+  if (pixel >= width * height) throw new Error("CARRIER EXHAUSTED");
+  const rem = slot % bpp;
+  const channel = channels[(rem / bitsPerChannel) | 0];
+  const bit = rem % bitsPerChannel;
+  const index = pixel * 4 + channel;
+  const mask = 1 << bit;
+  data[index] = value ? data[index] | mask : data[index] & ~mask;
+}
+
+function readSlot(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  channels: number[],
+  bitsPerChannel: number,
+  slot: number,
+): 0 | 1 {
+  const bpp = channels.length * bitsPerChannel;
+  const pixel = (slot / bpp) | 0;
+  if (pixel >= width * height) throw new Error("CARRIER EXHAUSTED");
+  const rem = slot % bpp;
+  const channel = channels[(rem / bitsPerChannel) | 0];
+  const bit = rem % bitsPerChannel;
+  return ((data[pixel * 4 + channel] >> bit) & 1) as 0 | 1;
+}
+
+function writeScatteredBytes(
+  image: PixelRaster,
+  config: StegConfig,
+  seed: number,
+  headerBits: number,
+  bytes: Uint8Array,
+): void {
+  const channels = channelIndices(config.channels);
+  const totalBits = image.width * image.height * channels.length * config.bitsPerChannel;
+  const remaining = totalBits - headerBits;
+  if (bytes.length * 8 > remaining) throw new Error("CARRIER EXHAUSTED");
+  let n = 0;
+  for (const byte of bytes) {
+    for (let i = 7; i >= 0; i--) {
+      const slot = headerBits + permuteIndex(n, remaining, seed);
+      writeSlot(image.data, image.width, image.height, channels, config.bitsPerChannel, slot, ((byte >> i) & 1) as 0 | 1);
+      n += 1;
+    }
+  }
+}
+
+function readScatteredBytes(
+  image: PixelRaster,
+  config: StegConfig,
+  seed: number,
+  headerBits: number,
+  count: number,
+): Uint8Array {
+  const channels = channelIndices(config.channels);
+  const totalBits = image.width * image.height * channels.length * config.bitsPerChannel;
+  const remaining = totalBits - headerBits;
+  if (count * 8 > remaining) throw new Error("CARRIER EXHAUSTED");
+  const out = new Uint8Array(count);
+  let n = 0;
+  for (let b = 0; b < count; b++) {
+    let byte = 0;
+    for (let i = 7; i >= 0; i--) {
+      const slot = headerBits + permuteIndex(n, remaining, seed);
+      byte |= readSlot(image.data, image.width, image.height, channels, config.bitsPerChannel, slot) << i;
+      n += 1;
+    }
+    out[b] = byte;
+  }
+  return out;
+}
+
+function randomSeed(): number {
+  const buf = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(buf);
+  return (buf[0] || 1) >>> 0;
+}
+
+function magicEq(bytes: Uint8Array, magic: Uint8Array): boolean {
+  return bytes.length >= magic.length && magic.every((value, index) => bytes[index] === value);
+}
+
 function u32be(value: number): Uint8Array {
   return new Uint8Array([
     (value >>> 24) & 0xff,
@@ -181,14 +306,7 @@ function readU32be(bytes: Uint8Array, offset = 0): number {
   );
 }
 
-function magicOk(bytes: Uint8Array): boolean {
-  return (
-    bytes.length >= MAGIC.length &&
-    MAGIC.every((value, index) => bytes[index] === value)
-  );
-}
-
-export function embed(source: ImageData, payload: Uint8Array, config: StegConfig): ImageData {
+export function embed(source: ImageData, payload: Uint8Array, config: StegConfig, seed = randomSeed()): ImageData {
   const cap = capacity(source.width, source.height, config);
   if (config.channels.r === false && config.channels.g === false && config.channels.b === false) {
     throw new Error("NO CHANNELS ARMED");
@@ -198,46 +316,76 @@ export function embed(source: ImageData, payload: Uint8Array, config: StegConfig
   }
 
   const stego = cloneImageData(source);
-  const frame = new Uint8Array(HEADER_BYTES + payload.length);
-  frame.set(MAGIC, 0);
-  frame.set(u32be(payload.length), 4);
-  frame.set(payload, HEADER_BYTES);
-
-  cursorFor(stego, config).writeBytes(frame);
+  const header = new Uint8Array(HEADER_BYTES);
+  header.set(MAGIC, 0);
+  header.set(u32be(payload.length), 4);
+  header.set(u32be(seed), 8);
+  cursorFor(stego, config).writeBytes(header);
+  writeScatteredBytes(stego, config, seed, HEADER_BYTES * 8, payload);
   return stego;
 }
 
 export function extract(source: PixelRaster, config: StegConfig): Uint8Array {
-  const cap = capacity(source.width, source.height, config);
+  const channelsUsed = channelIndices(config.channels).length;
+  const totalBits = source.width * source.height * channelsUsed * config.bitsPerChannel;
   const reader = cursorFor(source, config);
-  const header = reader.readBytes(HEADER_BYTES);
+  const magic = reader.readBytes(4);
 
-  if (!magicOk(header)) {
-    throw new Error("NO FRAME DETECTED");
+  if (magicEq(magic, MAGIC)) {
+    const length = readU32be(reader.readBytes(4));
+    const seed = readU32be(reader.readBytes(4));
+    const max = Math.floor(Math.max(0, totalBits - HEADER_BYTES * 8) / 8);
+    if (length > max) throw new Error("FRAME LENGTH CORRUPT");
+    return readScatteredBytes(source, config, seed, HEADER_BYTES * 8, length);
   }
 
-  const length = readU32be(header, 4);
-  if (length > cap.payloadBytes) {
-    throw new Error("FRAME LENGTH CORRUPT");
+  if (magicEq(magic, MAGIC_LEGACY)) {
+    const length = readU32be(reader.readBytes(4));
+    const max = Math.floor(Math.max(0, totalBits - HEADER_LEGACY_BYTES * 8) / 8);
+    if (length > max) throw new Error("FRAME LENGTH CORRUPT");
+    return reader.readBytes(length);
   }
 
-  return reader.readBytes(length);
+  throw new Error("NO FRAME DETECTED");
 }
 
-/** Zero the LSB bits that hold the DDRP frame so SRC/DELTA have a clean original. */
-export function stripFrame(source: ImageData, payloadBytes: number, config: StegConfig): ImageData {
+/** Zero the LSB bits that hold the frame so SRC/DELTA have a clean original. */
+export function stripFrame(source: ImageData, config: StegConfig): ImageData {
   const clean = cloneImageData(source);
-  cursorFor(clean, config).writeBytes(new Uint8Array(HEADER_BYTES + payloadBytes));
+  const reader = cursorFor(source, config);
+  const magic = reader.readBytes(4);
+  if (magicEq(magic, MAGIC)) {
+    const length = readU32be(reader.readBytes(4));
+    const seed = readU32be(reader.readBytes(4));
+    cursorFor(clean, config).writeBytes(new Uint8Array(HEADER_BYTES));
+    writeScatteredBytes(clean, config, seed, HEADER_BYTES * 8, new Uint8Array(length));
+    return clean;
+  }
+  if (magicEq(magic, MAGIC_LEGACY)) {
+    const length = readU32be(reader.readBytes(4));
+    cursorFor(clean, config).writeBytes(new Uint8Array(HEADER_LEGACY_BYTES + length));
+    return clean;
+  }
   return clean;
 }
 
 export function hasFrame(source: ImageData, config: StegConfig): boolean {
   try {
-    const header = cursorFor(source, config).readBytes(HEADER_BYTES);
-    if (!magicOk(header)) return false;
-    const length = readU32be(header, 4);
-    const cap = capacity(source.width, source.height, config);
-    return length <= cap.payloadBytes;
+    const channelsUsed = channelIndices(config.channels).length;
+    const totalBits = source.width * source.height * channelsUsed * config.bitsPerChannel;
+    const reader = cursorFor(source, config);
+    const magic = reader.readBytes(4);
+    if (magicEq(magic, MAGIC)) {
+      const length = readU32be(reader.readBytes(4));
+      const max = Math.floor(Math.max(0, totalBits - HEADER_BYTES * 8) / 8);
+      return length <= max;
+    }
+    if (magicEq(magic, MAGIC_LEGACY)) {
+      const length = readU32be(reader.readBytes(4));
+      const max = Math.floor(Math.max(0, totalBits - HEADER_LEGACY_BYTES * 8) / 8);
+      return length <= max;
+    }
+    return false;
   } catch {
     return false;
   }

@@ -60,6 +60,66 @@ function failMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIG = Buffer.from([0xff, 0xd8]);
+const MAX_REMOTE = 40_000_000;
+const FETCH_HOPS = 5;
+
+function isHttpUrl(value: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("BAD URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("URL MUST BE HTTP(S)");
+  }
+  return parsed;
+}
+
+function looksLikeImage(buf: Buffer, contentType: string): boolean {
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(PNG_SIG)) return true;
+  if (buf.length >= 2 && buf.subarray(0, 2).equals(JPEG_SIG)) return true;
+  if (buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") {
+    return true;
+  }
+  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return type.startsWith("image/");
+}
+
+function remoteName(parsed: URL): string {
+  const base = decodeURIComponent(parsed.pathname.split("/").pop() || "") || "remote.png";
+  return base.replace(/[^\w.-]+/g, "_") || "remote.png";
+}
+
+async function fetchRemoteImage(target: string): Promise<{ buf: Buffer; type: string; name: string }> {
+  let current = isHttpUrl(target).toString();
+  for (let hop = 0; hop < FETCH_HOPS; hop++) {
+    const parsed = isHttpUrl(current);
+    const response = await fetch(parsed.toString(), {
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
+      headers: { Accept: "image/png,image/jpeg,image/webp,image/*;q=0.9,*/*;q=0.1" },
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const loc = response.headers.get("location");
+      if (!loc) throw new Error("BAD REDIRECT");
+      current = new URL(loc, parsed).toString();
+      continue;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const len = Number(response.headers.get("content-length") || 0);
+    if (len > MAX_REMOTE) throw new Error("REMOTE FILE TOO LARGE");
+    const buf = Buffer.from(await response.arrayBuffer());
+    if (buf.length > MAX_REMOTE) throw new Error("REMOTE FILE TOO LARGE");
+    const type = response.headers.get("content-type") || "application/octet-stream";
+    if (!looksLikeImage(buf, type)) throw new Error(`NOT AN IMAGE (${type.split(";")[0] || "unknown"})`);
+    return { buf, type: type.split(";")[0]?.trim() || "application/octet-stream", name: remoteName(parsed) };
+  }
+  throw new Error("TOO MANY REDIRECTS");
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -146,6 +206,21 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
       send(res, 200, { ok: true });
     } catch (error) {
       send(res, 400, { error: failMessage(error, "LIBRARY DELETE FAILED") });
+    }
+    return true;
+  }
+
+  if (path === "/api/fetch" && req.method === "GET") {
+    try {
+      const target = url.searchParams.get("url") ?? "";
+      const result = await fetchRemoteImage(target);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", result.type);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Remote-Name", encodeURIComponent(result.name));
+      res.end(result.buf);
+    } catch (error) {
+      send(res, 400, { error: failMessage(error, "REMOTE FETCH FAILED") });
     }
     return true;
   }

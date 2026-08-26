@@ -14,7 +14,7 @@ import {
   type ChannelMask,
   type StegConfig,
 } from "./stegano";
-import { crypt, cryptRaw, estimateWiredBytes, fetchCiphers, looksLikeOpenssl, requestGptImage } from "./crypt";
+import { cryptRaw, estimateWiredBytes, fetchCiphers, looksLikeOpensslBytes, requestGptImage } from "./crypt";
 import { dumpEnvelope, guessMime, isAudio, isImage, isPdf, isVideo, packFile, recoverFile, sniffMime, type PackedFile } from "./binfile";
 import { decodePng, encodePng, isPngBytes, pngToImageData } from "./png";
 import {
@@ -118,10 +118,7 @@ function keyed(): boolean {
 }
 
 function frameLooksKeyed(bytes: Uint8Array): boolean {
-  const n = Math.min(bytes.length, 24);
-  let head = "";
-  for (let i = 0; i < n; i++) head += String.fromCharCode(bytes[i] ?? 0);
-  return looksLikeOpenssl(head);
+  return looksLikeOpensslBytes(bytes);
 }
 
 function payloadBytes(): number {
@@ -193,24 +190,24 @@ function refreshPipe(): void {
   const filePipe = state.io === "bin";
   if (keyed()) {
     const cipher = cipherValue() || "cipher";
-    pipe.textContent = filePipe ? "FILE → ENC → LSB" : "TEXT → ENC → B64 → LSB";
+    pipe.textContent = filePipe ? "FILE → ENC → LSB" : "TEXT → ENC → LSB";
     pipe.classList.add("hot");
-    proto.textContent = `FRAME  DDRP · u32be LEN · OPENSSL B64
-WALK   L→R, T→B · RGB LSBs, MSB-first bits
-PIPE   ${filePipe ? "DDFILE envelope · " : ""}${cipher} · pbkdf2 / 10000 iter · salt
+    proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · RAW OPENSSL
+WALK   header sequential · payload bits scattered (seeded Feistel)
+PIPE   ${filePipe ? "DDFILE envelope · " : ""}${cipher} · pbkdf2 / 10000 iter · salt · no Base64
 MATCH  bits, channels, cipher, and key must match`;
   } else if (filePipe) {
     pipe.textContent = "FILE → LSB";
     pipe.classList.remove("hot");
-    proto.textContent = `FRAME  DDRP · u32be LEN · DDFILE + RAW BYTES
-WALK   L→R, T→B · RGB LSBs, MSB-first bits
+    proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · DDFILE + RAW BYTES
+WALK   header sequential · payload bits scattered (seeded Feistel)
 PIPE   FILE → LSB  (UTF-8 is only for text)
 MATCH  extract bits/channels must match embed`;
   } else {
     pipe.textContent = "TEXT → LSB";
     pipe.classList.remove("hot");
-    proto.textContent = `FRAME  DDRP · u32be LEN · UTF-8 PAYLOAD
-WALK   L→R, T→B · RGB LSBs, MSB-first bits
+    proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · UTF-8 PAYLOAD
+WALK   header sequential · payload bits scattered (seeded Feistel)
 PIPE   TEXT → LSB  (set a key to encrypt first)
 MATCH  extract bits/channels/cipher/key must match embed`;
   }
@@ -516,7 +513,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
       });
     }
     state.stego = image;
-    state.original = stripFrame(image, found.payload.length, found.cfg);
+    state.original = stripFrame(image, found.cfg);
     state.heldFrame = found.payload;
     el<HTMLTextAreaElement>("message").value = "";
     clearBin();
@@ -539,7 +536,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
   syncSizeControls(image.width, image.height);
   refreshView();
   refreshIntel();
-  setStatus(`CARRIER INGESTED · ${name} · CLEAN — NO DDRP FRAME${shelved}`, "ok");
+  setStatus(`CARRIER INGESTED · ${name} · CLEAN — NO DDRS FRAME${shelved}`, "ok");
 }
 
 function imageFromBitmap(source: CanvasImageSource, width: number, height: number): ImageData {
@@ -590,13 +587,15 @@ async function loadBlob(blob: Blob, name: string): Promise<void> {
 async function loadUrl(url: string): Promise<void> {
   setStatus(`PULLING ${url} …`);
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    if (!blob.type.startsWith("image/") && blob.type !== "application/octet-stream" && blob.type !== "") {
-      throw new Error(`NOT AN IMAGE (${blob.type || "unknown"})`);
+    const response = await fetch(`/api/fetch?url=${encodeURIComponent(url)}`);
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body.error || `HTTP ${response.status}`);
     }
-    await loadBlob(blob, url.split("/").pop() || "remote.png");
+    const blob = await response.blob();
+    const headerName = response.headers.get("X-Remote-Name");
+    const name = headerName ? decodeURIComponent(headerName) : url.split("/").pop() || "remote.png";
+    await loadBlob(blob, name);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "FAIL";
     setStatus(`REMOTE READ BLOCKED · ${detail} · save locally and ingest`, "err");
@@ -629,9 +628,10 @@ async function onEmbed(): Promise<void> {
       let wire = el<HTMLTextAreaElement>("message").value;
       if (keyed()) {
         setStatus(`ENCRYPTING ${cipherValue()} …`);
-        wire = await crypt("encrypt", cipherValue(), keyValue(), wire);
+        payload = await cryptRaw("encrypt", cipherValue(), keyValue(), toUtf8(wire));
+      } else {
+        payload = toUtf8(wire);
       }
-      payload = toUtf8(wire);
     }
     state.stego = embed(state.original, payload, config());
     state.heldFrame = null;

@@ -144,7 +144,7 @@
               <div><dt>PIXELS</dt><dd id="st-px">—</dd></div>
               <div><dt>BPP</dt><dd id="st-bpp">—</dd></div>
               <div><dt>BITS</dt><dd id="st-bits">—</dd></div>
-              <div><dt>HEADER</dt><dd id="st-hdr">8 B  DDRP+LEN</dd></div>
+              <div><dt>HEADER</dt><dd id="st-hdr">12 B  DDRS+LEN+SEED</dd></div>
               <div><dt>USED</dt><dd id="st-used">—</dd></div>
             </dl>
 
@@ -170,8 +170,8 @@
               </div>
             </div>
 
-            <pre id="proto" class="proto">FRAME  DDRP · u32be LEN · UTF-8 PAYLOAD
-WALK   L→R, T→B · RGB LSBs, MSB-first bits
+            <pre id="proto" class="proto">FRAME  DDRS · u32be LEN · u32be SEED · UTF-8 PAYLOAD
+WALK   header sequential · payload bits scattered (seeded Feistel)
 PIPE   TEXT → LSB  (set a key to encrypt first)
 MATCH  extract bits/channels/cipher/key must match embed</pre>
           </div>
@@ -299,7 +299,7 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
               the carrier. <strong>SNAP</strong> copies the current pixel size into W×H; <strong>RESIZE</strong> resamples
               the loaded carrier to that size (this destroys any embedded payload). Set <strong>W × H</strong>
               (16–4096) before SYNTH SAT or GPT GEN. JPEG/WebP are accepted as input; export is always lossless PNG.
-              Remote URLs often fail CORS — save locally if PULL is blocked.
+              <strong>PULL</strong> fetches through this lab’s server so LAN/HTTP carriers work even without CORS.
             </p>
           </section>
           <section>
@@ -307,7 +307,7 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <p>
               <strong>SRC</strong> original · <strong>STEGO</strong> after embed · <strong>LSB</strong> amplified
               bit-plane · <strong>DELTA</strong> original vs stego. Loading a PNG that already has a
-              <code>DDRP</code> frame strips those LSBs into SRC, opens on <strong>STEGO</strong>, and
+              <code>DDRS</code> frame strips those LSBs into SRC, opens on <strong>STEGO</strong>, and
               <strong>holds</strong> the hidden bytes. Payload and capacity stay on that held frame until you
               <strong>EXTRACT</strong> (enter the key first if it was encrypted).
             </p>
@@ -335,10 +335,12 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
           <section>
             <h3>PAYLOAD PIPE</h3>
             <p>No key: <code>TEXT → LSB</code> or <code>FILE → LSB</code>.</p>
-            <p>With a key: <code>… → openssl enc → LSB</code> (OpenSSL’s own Base64 is only on the ciphertext).</p>
+            <p>With a key: <code>… → openssl enc → LSB</code> (raw <code>Salted__</code> ciphertext — no Base64).</p>
             <p>
-              The frame prefix is <code>DDRP</code> + 32-bit length, then raw payload bytes, walking
-              pixels left-to-right, top-to-bottom. Extract must use the same bits, channels, cipher, and key.
+              The frame prefix is <code>DDRS</code> + 32-bit length + 32-bit scatter seed, written sequentially
+              in RGB LSBs. Payload bits are then scattered with a seeded Feistel permutation so DELTA looks like
+              speckle instead of a filled band. Older <code>DDRP</code> sequential frames still extract. Match
+              bits, channels, cipher, and key.
             </p>
           </section>
           <section>
@@ -346,11 +348,11 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <p>
               Ciphers come from <code>openssl enc -ciphers</code> on this machine. Key wrapping modes are
               omitted (they are not for arbitrary text). Legacy toys (DES, RC4, Blowfish…) load via the
-              OpenSSL 3 legacy provider. Default KDF: <code>-pbkdf2 -iter 10000</code>, Base64 with
-              <code>-a -A</code> (no line wraps).
+              OpenSSL 3 legacy provider. Default KDF: <code>-pbkdf2 -iter 10000</code>. Ciphertext is raw
+              binary (<code>Salted__</code> + salt + ciphertext), not Base64.
             </p>
-            <pre>printf '%s' 'hello' | openssl enc -aes-256-cbc -e -a -A -pbkdf2 -pass pass:KEY
-openssl enc -aes-256-cbc -d -a -A -pbkdf2 -pass pass:KEY</pre>
+            <pre>printf '%s' 'hello' | openssl enc -aes-256-cbc -e -pbkdf2 -pass pass:KEY
+openssl enc -aes-256-cbc -d -pbkdf2 -pass pass:KEY</pre>
             <p>
               ECB and RC4 are in the list so you can see why they are poor choices. Prefer AES-*-CBC/CTR or
               ChaCha20 for the lab default.
@@ -360,7 +362,7 @@ openssl enc -aes-256-cbc -d -a -A -pbkdf2 -pass pass:KEY</pre>
             <h3>LIBRARY</h3>
             <p>
               Carriers land in <code>images/source/</code> (GPT working size, SYNTH, local/URL loads, resizes).
-              Images that already contain a <code>DDRP</code> frame, and anything produced by EMBED, land in
+              Images that already contain a <code>DDRS</code>/<code>DDRP</code> frame, and anything produced by EMBED, land in
               <code>images/output/</code>. A second save with the same name, pixel size, and payload is skipped.
               Open <strong>LIB</strong> to browse either reel and click a still to load it. Scratch files you
               plan to hide live in <code>payloads/</code>.

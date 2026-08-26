@@ -75,10 +75,10 @@ Generated files under `images/` and `payloads/` stay local (gitignored). Empty f
    - **MSG** — type text. Empty key = cleartext in the LSBs.
    - **BIN** — load a file. A small `DDFILE` header plus the raw bytes go into the image.
    - **GPT** — prompt, then **GPT GEN** to make a carrier; switch back to MSG or BIN to embed.
-5. Optional **CIPHER** + **KEY** runs `openssl enc` (`-a -A -pbkdf2 -iter 10000`) before embed / after extract.
+5. Optional **CIPHER** + **KEY** runs `openssl enc` (`-pbkdf2 -iter 10000`, raw ciphertext) before embed / after extract.
 6. **EMBED** writes LSBs and shelves a copy in `images/output/`. **EXPORT PNG** downloads it. **EXTRACT** reads the frame back.
 7. **LIB** browses source/output. Opening an output still reconstructs a hidden file on the **BIN** tab (player for audio, preview for images/PDF) and keeps the DDFILE + hex dump.
 
-Frame format: magic `DDRP` + 32-bit big-endian length + payload bytes, walking pixels left-to-right, top-to-bottom. Extract must use the same bits, channels, cipher, and key as embed.
+Frame format: magic `DDRS` + 32-bit big-endian length + 32-bit scatter seed (sequential LSBs), then payload bits scattered by a seeded permutation. Older `DDRP` sequential frames still extract. Extract must use the same bits, channels, cipher, and key as embed.
 
 **INFO** in the header is a longer field manual.

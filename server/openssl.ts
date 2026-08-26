@@ -181,7 +181,6 @@ export async function crypt(
 
   const token = `DD_PASS_${randomBytes(8).toString("hex")}`;
   let payload = Buffer.from(input);
-  const useArmor = op === "encrypt" || looksSaltedB64(payload);
   if (op === "decrypt") {
     if (looksSaltedB64(payload)) {
       payload = Buffer.from(payload.toString("latin1").replace(/\s+/g, ""), "latin1");
@@ -189,6 +188,7 @@ export async function crypt(
       throw new Error("NOT OPENSSL CIPHERTEXT — FRAME MAY BE CORRUPT (NEED A FRESH EMBED)");
     }
   }
+  const useArmor = op === "decrypt" && looksSaltedB64(Buffer.from(input));
   const args = [
     "enc",
     `-${cipher}`,
