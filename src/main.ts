@@ -15,7 +15,19 @@ import {
   type StegConfig,
 } from "./stegano";
 import { cryptRaw, estimateWiredBytes, fetchCiphers, looksLikeOpensslBytes, requestGptImage } from "./crypt";
-import { dumpEnvelope, guessMime, isAudio, isImage, isPdf, isVideo, packFile, recoverFile, sniffMime, type PackedFile } from "./binfile";
+import {
+  bytesToBase64,
+  guessMime,
+  isAudio,
+  isImage,
+  isPdf,
+  isVideo,
+  joinEnvelopes,
+  packFile,
+  recoverFiles,
+  sniffMime,
+  type PackedFile,
+} from "./binfile";
 import { decodePng, encodePng, isPngBytes, pngToImageData } from "./png";
 import {
   deleteLibraryPng,
@@ -27,6 +39,11 @@ import {
 } from "./library";
 
 type View = "carrier" | "stego" | "lsb" | "delta";
+
+type ArmedBin = {
+  packed: PackedFile;
+  url: string;
+};
 
 const canvas = el<HTMLCanvasElement>("stage");
 const maybeCtx = canvas.getContext("2d", { willReadFrequently: true });
@@ -40,16 +57,160 @@ const state = {
   view: "carrier" as View,
   bits: 1 as BitsPerChannel,
   channels: { r: true, g: true, b: true } as ChannelMask,
-  io: "msg" as "msg" | "gpt" | "bin",
-  bin: null as PackedFile | null,
-  binUrl: "" as string,
+  io: "msg" as "msg" | "bin",
+  bins: [] as ArmedBin[],
   binFromExtract: false,
   heldFrame: null as Uint8Array | null,
+  lab: "embed" as "embed" | "extract",
 };
 
 let uiBusy = false;
 let pendingCipher = "";
 const CIPHER_STORE = "dd-cipher";
+const LAB_STORE = "dd-lab";
+const LAYOUT_STORE = "dd-layout";
+const COL_MIN: Record<"carrier" | "intel" | "payload", number> = {
+  carrier: 240,
+  intel: 200,
+  payload: 260,
+};
+
+function layoutNarrow(): boolean {
+  return window.matchMedia("(max-width: 980px)").matches;
+}
+
+function colPanel(key: "carrier" | "intel" | "payload"): HTMLElement {
+  const node = el("workspace").querySelector(`[data-col="${key}"]`);
+  if (!(node instanceof HTMLElement)) throw new Error(`MISSING COLUMN ${key}`);
+  return node;
+}
+
+function applyColPercents(percents: [number, number, number]): void {
+  const keys = ["carrier", "intel", "payload"] as const;
+  keys.forEach((key, i) => {
+    colPanel(key).style.flex = `${percents[i]} 1 0%`;
+  });
+}
+
+function saveColLayout(): void {
+  if (layoutNarrow()) return;
+  const widths = (["carrier", "intel", "payload"] as const).map((key) => colPanel(key).getBoundingClientRect().width);
+  const total = widths.reduce((a, b) => a + b, 0);
+  if (total < 1) return;
+  const percents = widths.map((w) => Math.round((w / total) * 1000) / 10) as [number, number, number];
+  try {
+    localStorage.setItem(LAYOUT_STORE, JSON.stringify(percents));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function restoreColLayout(): void {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORE);
+    if (!raw) return;
+    const percents = JSON.parse(raw) as unknown;
+    if (!Array.isArray(percents) || percents.length !== 3) return;
+    if (!percents.every((n) => typeof n === "number" && n > 5 && n < 90)) return;
+    applyColPercents(percents as [number, number, number]);
+  } catch {
+    /* keep CSS defaults */
+  }
+}
+
+function wireSplitters(): void {
+  restoreColLayout();
+  window.matchMedia("(max-width: 980px)").addEventListener("change", (event) => {
+    if (event.matches) {
+      (["carrier", "intel", "payload"] as const).forEach((key) => {
+        colPanel(key).style.removeProperty("flex");
+      });
+      return;
+    }
+    restoreColLayout();
+  });
+  document.querySelectorAll(".splitter").forEach((node) => {
+    const split = node as HTMLElement;
+    split.addEventListener("dblclick", () => {
+      if (layoutNarrow()) return;
+      try {
+        localStorage.removeItem(LAYOUT_STORE);
+      } catch {
+        /* ignore */
+      }
+      (["carrier", "intel", "payload"] as const).forEach((key) => {
+        colPanel(key).style.removeProperty("flex");
+      });
+    });
+    split.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 && event.pointerType === "mouse") return;
+      if (layoutNarrow()) return;
+      event.preventDefault();
+      const index = Number(split.dataset.split);
+      const pair: Array<"carrier" | "intel" | "payload"> =
+        index === 0 ? ["carrier", "intel"] : ["intel", "payload"];
+      const keys = ["carrier", "intel", "payload"] as const;
+      const start = Object.fromEntries(
+        keys.map((key) => [key, colPanel(key).getBoundingClientRect().width]),
+      ) as Record<(typeof keys)[number], number>;
+      keys.forEach((key) => {
+        colPanel(key).style.flex = `0 0 ${start[key]}px`;
+      });
+      const left = colPanel(pair[0]);
+      const right = colPanel(pair[1]);
+      const startX = event.clientX;
+      const startLeft = start[pair[0]];
+      const startRight = start[pair[1]];
+      split.classList.add("dragging");
+      document.body.classList.add("col-resizing");
+      try {
+        split.setPointerCapture(event.pointerId);
+      } catch {
+        /* synthetic pointer */
+      }
+
+      const onMove = (move: PointerEvent) => {
+        if (move.pointerId !== event.pointerId) return;
+        const dx = move.clientX - startX;
+        let nextLeft = startLeft + dx;
+        let nextRight = startRight - dx;
+        const minLeft = COL_MIN[pair[0]];
+        const minRight = COL_MIN[pair[1]];
+        if (nextLeft < minLeft) {
+          nextRight -= minLeft - nextLeft;
+          nextLeft = minLeft;
+        }
+        if (nextRight < minRight) {
+          nextLeft -= minRight - nextRight;
+          nextRight = minRight;
+        }
+        if (nextLeft < minLeft || nextRight < minRight) return;
+        left.style.flex = `0 0 ${nextLeft}px`;
+        right.style.flex = `0 0 ${nextRight}px`;
+      };
+
+      const onUp = (up: PointerEvent) => {
+        if (up.pointerId !== event.pointerId) return;
+        try {
+          split.releasePointerCapture(event.pointerId);
+        } catch {
+          /* already released */
+        }
+        split.classList.remove("dragging");
+        document.body.classList.remove("col-resizing");
+        split.removeEventListener("pointermove", onMove);
+        split.removeEventListener("pointerup", onUp);
+        split.removeEventListener("pointercancel", onUp);
+        saveColLayout();
+        restoreColLayout();
+      };
+
+      split.addEventListener("pointermove", onMove);
+      split.addEventListener("pointerup", onUp);
+      split.addEventListener("pointercancel", onUp);
+    });
+  });
+}
 
 const session = `DD-${Math.random().toString(16).slice(2, 6).toUpperCase()}-${String(
   Math.floor(Math.random() * 99),
@@ -122,8 +283,9 @@ function frameLooksKeyed(bytes: Uint8Array): boolean {
 }
 
 function payloadBytes(): number {
-  if (state.io === "bin" && state.bin) {
-    return estimateWiredBytes(state.bin.envelope.length, keyed());
+  if (state.io === "bin" && state.bins.length) {
+    const raw = state.bins.reduce((sum, item) => sum + item.packed.envelope.length, 0);
+    return estimateWiredBytes(raw, keyed());
   }
   const text = el<HTMLTextAreaElement>("message").value;
   if (!text && state.heldFrame) return state.heldFrame.length;
@@ -132,7 +294,6 @@ function payloadBytes(): number {
 }
 
 function overflowReason(): string | null {
-  if (state.io === "gpt") return null;
   const cap = currentCap();
   if (!cap) return null;
   const used = payloadBytes();
@@ -155,29 +316,75 @@ function syncExportButton(): void {
 }
 
 function syncBinDownload(): void {
-  const btn = el<HTMLButtonElement>("bin-dl");
-  const show = Boolean(state.bin && state.binFromExtract);
-  btn.hidden = !show;
-  btn.disabled = uiBusy || !show;
+  const dl = el<HTMLButtonElement>("bin-dl");
+  const clear = el<HTMLButtonElement>("bin-clear");
+  const has = state.bins.length > 0;
+  dl.hidden = !has;
+  dl.disabled = uiBusy || !has;
+  clear.hidden = !has || state.lab === "extract";
+  clear.disabled = uiBusy || !has;
 }
 
 function setBusy(busy: boolean): void {
   uiBusy = busy;
-  for (const id of ["embed", "extract", "wipe", "gpt-gen"]) {
+  for (const id of ["embed", "extract", "wipe", "gpt-gen", "gpt-open"]) {
     el<HTMLButtonElement>(id).disabled = busy;
   }
+  el<HTMLTextAreaElement>("gpt-prompt").disabled = busy;
+  el<HTMLInputElement>("bin-file").disabled = busy;
   syncExportButton();
   syncBinDownload();
 }
 
-const MSG_PLACEHOLDER = "enter dead-drop text — embed writes LSBs, extract reads them back";
-const GPT_PLACEHOLDER = "describe a carrier — wet cobblestones at night, film grain, wide shot";
+const MSG_PLACEHOLDER = "enter dead-drop text — embed writes LSBs";
+const EXTRACT_PLACEHOLDER = "recovered text lands here after EXTRACT";
 
-function applyIoMode(mode: "msg" | "gpt" | "bin"): void {
+function payloadTitle(): string {
+  if (state.lab === "extract") return "RECOVERED";
+  if (state.io === "bin") return "BINARY";
+  return "PAYLOAD";
+}
+
+function setGptPane(open: boolean): void {
+  el("gpt-pane").hidden = !open;
+  el("gpt-open").classList.toggle("active", open);
+  el("gpt-open").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) el<HTMLTextAreaElement>("gpt-prompt").focus();
+}
+
+function applyLabMode(mode: "embed" | "extract", silent = false): void {
+  state.lab = mode;
+  el("app").setAttribute("data-lab", mode);
+  document.querySelectorAll("#lab-mode button").forEach((btn) => {
+    btn.classList.toggle("active", (btn as HTMLElement).dataset.lab === mode);
+  });
+  try {
+    localStorage.setItem(LAB_STORE, mode);
+  } catch {
+    /* ignore quota */
+  }
+  if (mode === "extract") setGptPane(false);
+  el("payload-title").textContent = payloadTitle();
+  el("empty-lead").textContent = mode === "extract" ? "DROP A STEGO PNG" : "DROP, SYNTH, OR GPT A CARRIER";
+  el("empty-dim").textContent =
+    mode === "extract"
+      ? "Then enter the key if it was encrypted, and EXTRACT."
+      : "Hide a payload in PNG LSBs. PNG preferred; export is always PNG.";
+  el<HTMLInputElement>("key").placeholder =
+    mode === "extract" ? "enter the embed key if the payload was encrypted" : "optional — empty keeps cleartext";
+  el<HTMLTextAreaElement>("message").placeholder = mode === "extract" ? EXTRACT_PLACEHOLDER : MSG_PLACEHOLDER;
+  refreshIntel();
+  if (!silent && !state.original) {
+    setStatus(mode === "extract" ? "STANDBY // LOAD A STEGO PNG TO EXTRACT" : "STANDBY // LOAD OR SYNTH A CARRIER TO EMBED");
+  }
+}
+
+function applyIoMode(mode: "msg" | "bin"): void {
   state.io = mode;
   el("payload-panel").setAttribute("data-mode", mode);
-  el("payload-title").textContent = mode === "gpt" ? "PROMPT" : mode === "bin" ? "BINARY" : "PAYLOAD";
-  el<HTMLTextAreaElement>("message").placeholder = mode === "gpt" ? GPT_PLACEHOLDER : MSG_PLACEHOLDER;
+  el("payload-title").textContent = payloadTitle();
+  el<HTMLTextAreaElement>("message").placeholder =
+    state.lab === "extract" ? EXTRACT_PLACEHOLDER : MSG_PLACEHOLDER;
   document.querySelectorAll("#io-mode button").forEach((btn) => {
     btn.classList.toggle("active", (btn as HTMLElement).dataset.mode === mode);
   });
@@ -188,16 +395,17 @@ function refreshPipe(): void {
   const pipe = el("pipe-label");
   const proto = el("proto");
   const filePipe = state.io === "bin";
+  const many = state.bins.length !== 1;
   if (keyed()) {
     const cipher = cipherValue() || "cipher";
-    pipe.textContent = filePipe ? "FILE → ENC → LSB" : "TEXT → ENC → LSB";
+    pipe.textContent = filePipe ? `${many ? "FILES" : "FILE"} → ENC → LSB` : "TEXT → ENC → LSB";
     pipe.classList.add("hot");
     proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · RAW OPENSSL
 WALK   header sequential · payload bits scattered (seeded Feistel)
 PIPE   ${filePipe ? "DDFILE envelope · " : ""}${cipher} · pbkdf2 / 10000 iter · salt · no Base64
 MATCH  bits, channels, cipher, and key must match`;
   } else if (filePipe) {
-    pipe.textContent = "FILE → LSB";
+    pipe.textContent = many ? "FILES → LSB" : "FILE → LSB";
     pipe.classList.remove("hot");
     proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · DDFILE + RAW BYTES
 WALK   header sequential · payload bits scattered (seeded Feistel)
@@ -320,6 +528,7 @@ function refreshIntel(): void {
     link.textContent = "NO CARRIER";
     link.className = "link-state";
     el("payload-meta").textContent = ioMeta(used, wireNote);
+    refreshBinInfo();
     syncExportButton();
     syncBinDownload();
     return;
@@ -341,8 +550,7 @@ function refreshIntel(): void {
   el("st-bits").textContent = cap.totalBits.toLocaleString();
   el("st-used").textContent = `${used.toLocaleString()} B${wireNote}`;
   el("payload-meta").textContent = ioMeta(used, wireNote);
-
-  if (state.bin) refreshBinInfo();
+  refreshBinInfo();
 
   const framed = state.original ? hasFrame(state.stego ?? state.original, config()) : false;
   if (framed) {
@@ -366,26 +574,32 @@ function refreshIntel(): void {
   syncBinDownload();
 }
 
+function fileStatus(files: PackedFile[]): string {
+  if (files.length === 1) return `FILE ${files[0].name} · ${formatBytes(files[0].bytes.length)} RAW`;
+  const bytes = files.reduce((sum, file) => sum + file.bytes.length, 0);
+  return `${files.length} FILES · ${formatBytes(bytes)} RAW`;
+}
+
 async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   const box = el<HTMLTextAreaElement>("message");
-  const direct = recoverFile(bytes);
-  if (direct) {
+  const direct = recoverFiles(bytes);
+  if (direct.length) {
     state.heldFrame = null;
-    armBinary(direct, true);
+    armBinaries(direct, true);
     applyIoMode("bin");
-    setStatus(`${prefix} · FILE ${direct.name} · ${formatBytes(direct.bytes.length)} RAW`, "ok");
+    setStatus(`${prefix} · ${fileStatus(direct)}`, "ok");
     return;
   }
 
   if (keyed()) {
     try {
       const plain = await cryptRaw("decrypt", cipherValue(), keyValue(), bytes);
-      const packed = recoverFile(plain);
-      if (packed) {
+      const packed = recoverFiles(plain);
+      if (packed.length) {
         state.heldFrame = null;
-        armBinary(packed, true);
+        armBinaries(packed, true);
         applyIoMode("bin");
-        setStatus(`${prefix} · FILE ${packed.name} · ${formatBytes(packed.bytes.length)} RAW · DECRYPTED`, "ok");
+        setStatus(`${prefix} · ${fileStatus(packed)} · DECRYPTED`, "ok");
         return;
       }
       const decoded = fromUtf8(plain);
@@ -420,7 +634,7 @@ async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   }
   state.heldFrame = null;
   clearBin();
-  applyIoMode(state.io === "gpt" ? "gpt" : "msg");
+  applyIoMode("msg");
   box.value = decoded.text;
   refreshIntel();
   setStatus(`${prefix} · ${bytes.length} B`, "ok");
@@ -518,6 +732,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
     el<HTMLTextAreaElement>("message").value = "";
     clearBin();
     applyIoMode("msg");
+    applyLabMode("extract", true);
     setView("stego");
     syncSizeControls(image.width, image.height);
     refreshView();
@@ -532,6 +747,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
   state.original = image;
   state.stego = null;
   state.heldFrame = null;
+  applyLabMode("embed", true);
   setView("carrier");
   syncSizeControls(image.width, image.height);
   refreshView();
@@ -608,22 +824,19 @@ async function onEmbed(): Promise<void> {
     return;
   }
   try {
-    if (state.io === "bin" && !state.bin) {
-      setStatus("NO BINARY ARMED — USE BIN → LOAD BINARY (CARRIER LOCAL FILE REPLACES THE PICTURE)", "err");
+    if (state.io === "bin" && !state.bins.length) {
+      setStatus("NO BINARY ARMED — DROP FILES ONTO PAYLOAD OR USE ADD FILES", "err");
       return;
     }
     setBusy(true);
     let payload: Uint8Array;
-    const filePayload = state.bin;
+    const filePayload = state.io === "bin" ? joinEnvelopes(state.bins.map((item) => item.packed)) : null;
     if (filePayload) {
-      payload = filePayload.envelope;
+      payload = filePayload;
       if (keyed()) {
         setStatus(`ENCRYPTING ${cipherValue()} …`);
         payload = await cryptRaw("encrypt", cipherValue(), keyValue(), payload);
       }
-    } else if (state.io === "bin") {
-      setStatus("NO BINARY ARMED", "err");
-      return;
     } else {
       let wire = el<HTMLTextAreaElement>("message").value;
       if (keyed()) {
@@ -638,7 +851,11 @@ async function onEmbed(): Promise<void> {
     setView("stego");
     refreshView();
     refreshIntel();
-    const pipe = keyed() ? ` · ${cipherValue()}` : filePayload ? " · DDFILE RAW" : "";
+    const pipe = keyed()
+      ? ` · ${cipherValue()}`
+      : filePayload
+        ? ` · ${state.bins.length} DDFILE${state.bins.length === 1 ? "" : "S"} RAW`
+        : "";
     const stem = state.name.replace(/\.[^.]+$/, "") || "deaddrop";
     const saved = state.stego ? await persistPng("output", `${stem}.stego.png`, state.stego) : null;
     setStatus(
@@ -670,11 +887,9 @@ async function onExtract(): Promise<void> {
 }
 
 function ioMeta(used: number, wireNote: string): string {
-  if (state.io === "gpt") {
-    return `${el<HTMLTextAreaElement>("message").value.length.toLocaleString()} CH`;
-  }
-  if (state.io === "bin" && state.bin) {
-    return `${formatBytes(used)}${wireNote}`;
+  if (state.io === "bin" && state.bins.length) {
+    const n = state.bins.length;
+    return `${n} FILE${n === 1 ? "" : "S"} · ${formatBytes(used)}${wireNote}`;
   }
   return `${used.toLocaleString()} B${wireNote}`;
 }
@@ -685,109 +900,280 @@ function blobFromBytes(bytes: Uint8Array, mime: string): Blob {
   return new Blob([copy], { type: mime });
 }
 
-function clearBin(): void {
-  if (state.binUrl) URL.revokeObjectURL(state.binUrl);
-  state.bin = null;
-  state.binUrl = "";
-  state.binFromExtract = false;
-  hideBinPreview();
-  const dump = el("bin-dump");
-  dump.textContent = "";
-  dump.hidden = true;
-  el("bin-info").textContent = "NO FILE ARMED — AUDIO, PDF, ZIP…";
-  syncBinDownload();
+function binKind(mime: string): "image" | "audio" | "video" | "pdf" | "file" {
+  if (isImage(mime)) return "image";
+  if (isAudio(mime)) return "audio";
+  if (isVideo(mime)) return "video";
+  if (isPdf(mime)) return "pdf";
+  return "file";
 }
 
-function hideBinPreview(): void {
-  const audio = el<HTMLAudioElement>("bin-audio");
-  audio.pause();
-  audio.removeAttribute("src");
-  audio.hidden = true;
-  const image = el<HTMLImageElement>("bin-image");
-  image.onload = null;
-  image.onerror = null;
-  image.removeAttribute("src");
-  image.alt = "";
-  image.hidden = true;
-  const video = el<HTMLVideoElement>("bin-video");
-  video.pause();
-  video.removeAttribute("src");
-  video.hidden = true;
-  const pdf = el<HTMLIFrameElement>("bin-pdf");
-  pdf.removeAttribute("src");
-  pdf.hidden = true;
+function clearBin(): void {
+  for (const item of state.bins) URL.revokeObjectURL(item.url);
+  state.bins = [];
+  state.binFromExtract = false;
+  renderBinList();
+  refreshBinInfo();
+  syncBinDownload();
 }
 
 function refreshBinInfo(): void {
-  if (!state.bin) {
-    el("bin-info").textContent = "NO FILE ARMED — AUDIO, PDF, ZIP…";
+  const n = state.bins.length;
+  if (!n) {
+    el("bin-info").textContent = "DROP FILES HERE — IMAGES SHOW BEFORE EMBED";
     return;
   }
   const cap = currentCap();
-  const wire = estimateWiredBytes(state.bin.envelope.length, keyed());
+  const raw = state.bins.reduce((sum, item) => sum + item.packed.bytes.length, 0);
+  const wire = estimateWiredBytes(
+    state.bins.reduce((sum, item) => sum + item.packed.envelope.length, 0),
+    keyed(),
+  );
   const over = Boolean(cap && wire > cap.payloadBytes);
-  el("bin-info").textContent = `${state.bin.name}  ·  RAW ${formatBytes(state.bin.bytes.length)}  →  ${formatBytes(wire)} IN IMAGE${over ? "  OVER SLOT" : ""}`;
+  const names = n === 1 ? state.bins[0].packed.name : `${n} FILES`;
+  el("bin-info").textContent = `${names}  ·  RAW ${formatBytes(raw)}  →  ${formatBytes(wire)} IN IMAGE${over ? "  OVER SLOT" : ""}`;
 }
 
 function armBinary(packed: PackedFile, fromExtract = false): void {
-  if (state.binUrl) URL.revokeObjectURL(state.binUrl);
   const mime = sniffMime(packed.bytes) || packed.mime;
   packed = mime === packed.mime ? packed : { ...packed, mime };
-  state.bin = packed;
+  const url = URL.createObjectURL(blobFromBytes(packed.bytes, packed.mime));
+  state.bins.push({ packed, url });
+  if (fromExtract) state.binFromExtract = true;
+}
+
+function armBinaries(files: PackedFile[], fromExtract = false): void {
+  clearBin();
   state.binFromExtract = fromExtract;
-  state.binUrl = URL.createObjectURL(blobFromBytes(packed.bytes, packed.mime));
+  for (const packed of files) armBinary(packed, fromExtract);
+  renderBinList();
   refreshBinInfo();
   syncBinDownload();
-  const dumpNode = el("bin-dump");
-  dumpNode.textContent = dumpEnvelope(packed);
-  dumpNode.hidden = false;
-  hideBinPreview();
-  const url = state.binUrl;
-  if (isAudio(packed.mime)) {
-    const audio = el<HTMLAudioElement>("bin-audio");
-    audio.src = url;
-    audio.hidden = false;
-  } else if (isImage(packed.mime)) {
-    const image = el<HTMLImageElement>("bin-image");
-    image.alt = packed.name;
-    image.src = url;
-    image.hidden = false;
-    image.onload = () => setStatus(`IMAGE PAYLOAD · ${packed.name} · ${image.naturalWidth}×${image.naturalHeight}`, "ok");
-    image.onerror = () => setStatus(`IMAGE PAYLOAD LOADED AS BYTES BUT PREVIEW FAILED · ${packed.name}`, "warn");
-  } else if (isVideo(packed.mime)) {
-    const video = el<HTMLVideoElement>("bin-video");
-    video.src = url;
-    video.hidden = false;
-  } else if (isPdf(packed.mime)) {
-    const pdf = el<HTMLIFrameElement>("bin-pdf");
-    pdf.src = url;
-    pdf.hidden = false;
-  }
 }
 
-async function loadBinaryFile(file: File): Promise<void> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  armBinary(packFile(file.name, guessMime(file.name, file.type), bytes));
+function removeBin(index: number): void {
+  const item = state.bins[index];
+  if (!item) return;
+  URL.revokeObjectURL(item.url);
+  state.bins.splice(index, 1);
+  renderBinList();
+  refreshIntel();
+}
+
+function renderBinList(): void {
+  const list = el("bin-list");
+  list.replaceChildren();
+  list.dataset.count = String(state.bins.length);
+  if (!state.bins.length) {
+    const empty = document.createElement("div");
+    empty.className = "bin-empty";
+    empty.textContent = "DROP FILES OR IMAGES HERE";
+    list.append(empty);
+    return;
+  }
+  state.bins.forEach((item, index) => {
+    const { packed, url } = item;
+    const kind = binKind(packed.mime);
+    const card = document.createElement("article");
+    card.className = "bin-card";
+    card.dataset.kind = kind;
+    if (kind === "image") {
+      const image = document.createElement("img");
+      image.className = "bin-thumb";
+      image.alt = packed.name;
+      image.src = url;
+      card.append(image);
+    } else if (kind === "audio") {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = url;
+      card.append(audio);
+    } else if (kind === "video") {
+      const video = document.createElement("video");
+      video.controls = true;
+      video.src = url;
+      card.append(video);
+    } else if (kind === "pdf") {
+      const frame = document.createElement("iframe");
+      frame.className = "bin-pdf-frame";
+      frame.title = packed.name;
+      frame.src = url;
+      card.append(frame);
+    } else {
+      const glyph = document.createElement("div");
+      glyph.className = "bin-glyph";
+      glyph.textContent = packed.name.split(".").pop()?.toUpperCase() || "FILE";
+      card.append(glyph);
+    }
+    const meta = document.createElement("div");
+    meta.className = "bin-card-meta";
+    const name = document.createElement("div");
+    name.className = "bin-card-name";
+    name.textContent = packed.name;
+    name.title = packed.name;
+    const size = document.createElement("div");
+    size.className = "bin-card-size";
+    size.textContent = formatBytes(packed.bytes.length);
+    const actions = document.createElement("div");
+    actions.className = "bin-card-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "OPEN";
+    open.title = "Open as a data: Base64 URL in a new tab";
+    open.addEventListener("click", () => openBinaryTab(index));
+    const get = document.createElement("button");
+    get.type = "button";
+    get.textContent = "GET";
+    get.addEventListener("click", () => saveBinaryAt(index));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ${packed.name}`);
+    remove.addEventListener("click", () => removeBin(index));
+    actions.append(open, get, remove);
+    meta.append(name, size, actions);
+    card.append(meta);
+    list.append(card);
+  });
+}
+
+async function loadBinaryFiles(files: File[]): Promise<void> {
+  const incoming = files.filter((file) => file.size > 0);
+  if (!incoming.length) return;
   applyIoMode("bin");
+  for (const file of incoming) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    armBinary(packFile(file.name, guessMime(file.name, file.type), bytes));
+  }
+  renderBinList();
+  refreshIntel();
   const cap = currentCap();
   const used = payloadBytes();
+  const label = incoming.length === 1 ? incoming[0].name : `${incoming.length} FILES`;
   if (cap && used > cap.payloadBytes) {
-    setStatus(`FILE ARMED · OVER CAPACITY · ${formatBytes(used)} > ${formatBytes(cap.payloadBytes)}`, "err");
+    setStatus(`FILES ARMED · OVER CAPACITY · ${formatBytes(used)} > ${formatBytes(cap.payloadBytes)}`, "err");
   } else {
-    setStatus(`FILE ARMED · ${file.name} · ${formatBytes(bytes.length)} RAW`, "ok");
+    setStatus(`ARMED ${label} · ${state.bins.length} IN PAYLOAD`, "ok");
   }
 }
 
-function saveBinary(): void {
-  if (!state.bin) {
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+
+function binaryDataUrl(packed: PackedFile): string {
+  const mime = packed.mime.trim() || "application/octet-stream";
+  return `data:${mime};base64,${bytesToBase64(packed.bytes)}`;
+}
+
+function dataTabHtml(packed: PackedFile, dataUrl: string): string {
+  const title = escapeHtml(packed.name);
+  const kind = binKind(packed.mime);
+  const media =
+    kind === "image"
+      ? `<img src="${dataUrl}" alt="${title}">`
+      : kind === "audio"
+        ? `<audio src="${dataUrl}" controls autoplay></audio>`
+        : kind === "video"
+          ? `<video src="${dataUrl}" controls autoplay></video>`
+          : `<iframe src="${dataUrl}" title="${title}"></iframe>`;
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${title}</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0f0c; }
+    body { display: grid; place-items: center; }
+    img, video { max-width: 100%; max-height: 100vh; }
+    audio, iframe { width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>${media}</body>
+</html>`;
+}
+
+function paintDataTab(tab: Window, packed: PackedFile, dataUrl: string): void {
+  tab.document.open();
+  tab.document.write(dataTabHtml(packed, dataUrl));
+  tab.document.close();
+}
+
+function openDataTabByLink(packed: PackedFile, dataUrl: string): void {
+  const blob = new Blob([dataTabHtml(packed, dataUrl)], { type: "text/html" });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
+}
+
+function openBinaryTab(index: number): void {
+  const item = state.bins[index];
+  if (!item) {
+    setStatus("NO BINARY ARMED", "err");
+    return;
+  }
+  const dataUrl = binaryDataUrl(item.packed);
+  const tab = window.open("about:blank", "_blank");
+  if (!tab) {
+    openDataTabByLink(item.packed, dataUrl);
+    setStatus(`OPENED ${item.packed.name} · DATA URL`, "ok");
+    return;
+  }
+  try {
+    tab.location.replace(dataUrl);
+  } catch {
+    paintDataTab(tab, item.packed, dataUrl);
+    setStatus(`OPENED ${item.packed.name} · DATA URL`, "ok");
+    return;
+  }
+  window.setTimeout(() => {
+    try {
+      if (!tab.closed && tab.location.href === "about:blank") {
+        paintDataTab(tab, item.packed, dataUrl);
+      }
+    } catch {
+      /* navigated to the data: URL */
+    }
+  }, 0);
+  setStatus(`OPENED ${item.packed.name} · DATA URL`, "ok");
+}
+
+function saveBinaryAt(index: number): void {
+  const item = state.bins[index];
+  if (!item) {
     setStatus("NO BINARY ARMED", "err");
     return;
   }
   const a = document.createElement("a");
-  a.href = state.binUrl || URL.createObjectURL(blobFromBytes(state.bin.bytes, state.bin.mime));
-  a.download = state.bin.name;
+  a.href = item.url;
+  a.download = item.packed.name;
   a.click();
-  setStatus(`SAVED ${state.bin.name} · ${formatBytes(state.bin.bytes.length)}`, "ok");
+  setStatus(`SAVED ${item.packed.name} · ${formatBytes(item.packed.bytes.length)}`, "ok");
+}
+
+async function saveAllBinaries(): Promise<void> {
+  if (!state.bins.length) {
+    setStatus("NO BINARY ARMED", "err");
+    return;
+  }
+  for (let i = 0; i < state.bins.length; i++) {
+    saveBinaryAt(i);
+    if (i < state.bins.length - 1) await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+}
+
+function filesFromDrop(event: DragEvent): File[] {
+  return [...(event.dataTransfer?.files ?? [])];
+}
+
+function dropHasFiles(event: DragEvent): boolean {
+  return [...(event.dataTransfer?.types ?? [])].includes("Files");
 }
 
 function b64ToBlob(b64: string, mime: string): Blob {
@@ -798,8 +1184,9 @@ function b64ToBlob(b64: string, mime: string): Blob {
 }
 
 async function onGptGen(): Promise<void> {
-  const prompt = el<HTMLTextAreaElement>("message").value.trim();
+  const prompt = el<HTMLTextAreaElement>("gpt-prompt").value.trim();
   if (!prompt) {
+    setGptPane(true);
     setStatus("PROMPT EMPTY", "err");
     return;
   }
@@ -814,10 +1201,7 @@ async function onGptGen(): Promise<void> {
     const raster = imageFromBitmap(bitmap, size.width, size.height);
     bitmap.close();
     await ingest(raster, `GPT-${targetKey}.png`, "source");
-    setStatus(
-      `GPT CARRIER LOCKED · ${result.model} ${result.apiSize} → ${size.width}×${size.height} · SWITCH TO MSG TO EMBED`,
-      "ok",
-    );
+    setStatus(`GPT CARRIER LOCKED · ${result.model} ${result.apiSize} → ${size.width}×${size.height}`, "ok");
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "GPT IMAGE FAILED", "err");
   } finally {
@@ -1123,6 +1507,7 @@ function wireUi(): void {
   el("session").textContent = `SESSION ${session}`;
   tickClock();
   window.setInterval(tickClock, 1000);
+  wireSplitters();
 
   el<HTMLInputElement>("file").addEventListener("change", async (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
@@ -1162,33 +1547,62 @@ function wireUi(): void {
     });
   }
 
+  document.querySelectorAll("#lab-mode button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyLabMode(((btn as HTMLElement).dataset.lab as "embed" | "extract") ?? "embed");
+    });
+  });
+
   el("embed").addEventListener("click", () => void onEmbed());
   el("extract").addEventListener("click", () => void onExtract());
+  el("gpt-open").addEventListener("click", () => {
+    setGptPane(el("gpt-pane").hidden);
+  });
   el("gpt-gen").addEventListener("click", () => void onGptGen());
-  el("bin-dl").addEventListener("click", saveBinary);
+  el<HTMLTextAreaElement>("gpt-prompt").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void onGptGen();
+    }
+  });
+  el("bin-dl").addEventListener("click", () => void saveAllBinaries());
+  el("bin-clear").addEventListener("click", () => {
+    clearBin();
+    refreshIntel();
+    setStatus("BINARY PAYLOAD CLEARED", "warn");
+  });
   el("export").addEventListener("click", () => void onExport());
   el("wipe").addEventListener("click", onWipe);
 
   el<HTMLInputElement>("bin-file").addEventListener("change", async (event) => {
-    const file = (event.target as HTMLInputElement).files?.[0];
-    if (file) await loadBinaryFile(file);
+    const input = event.target as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = "";
+    if (files.length) await loadBinaryFiles(files);
   });
-  const binPane = el("bin-pane");
-  binPane.addEventListener("dragover", (event) => {
+  const payload = el("payload-panel");
+  payload.addEventListener("dragover", (event) => {
+    if (!dropHasFiles(event)) return;
     event.preventDefault();
-    binPane.classList.add("hot");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    payload.classList.add("drop-files");
   });
-  binPane.addEventListener("dragleave", () => binPane.classList.remove("hot"));
-  binPane.addEventListener("drop", async (event) => {
+  payload.addEventListener("dragleave", (event) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && payload.contains(next)) return;
+    payload.classList.remove("drop-files");
+  });
+  payload.addEventListener("drop", async (event) => {
+    if (!dropHasFiles(event)) return;
     event.preventDefault();
-    binPane.classList.remove("hot");
-    const file = event.dataTransfer?.files?.[0];
-    if (file) await loadBinaryFile(file);
+    payload.classList.remove("drop-files");
+    const files = filesFromDrop(event);
+    if (files.length) await loadBinaryFiles(files);
   });
 
   document.querySelectorAll("#io-mode button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      applyIoMode(((btn as HTMLElement).dataset.mode as "msg" | "gpt" | "bin") ?? "msg");
+      applyIoMode(((btn as HTMLElement).dataset.mode as "msg" | "bin") ?? "msg");
     });
   });
 
@@ -1329,7 +1743,10 @@ function wireUi(): void {
   });
 
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeModals();
+    if (event.key === "Escape") {
+      closeModals();
+      if (!el("gpt-pane").hidden) setGptPane(false);
+    }
     const typing =
       event.target instanceof HTMLInputElement ||
       event.target instanceof HTMLTextAreaElement ||
@@ -1349,7 +1766,7 @@ function wireUi(): void {
     if (!(event.ctrlKey || event.metaKey)) return;
     if (event.key.toLowerCase() === "e") {
       event.preventDefault();
-      if (state.io === "gpt") void onGptGen();
+      if (state.lab === "extract") void onExtract();
       else void onEmbed();
     } else if (event.key.toLowerCase() === "enter" && event.shiftKey) {
       event.preventDefault();
@@ -1375,9 +1792,15 @@ function wireUi(): void {
   });
 
   void loadCipherSelect();
-  setStatus("STANDBY // SYNTHESIZING DEFAULT CARRIER …");
+  let savedLab: string | null = null;
+  try {
+    savedLab = localStorage.getItem(LAB_STORE);
+  } catch {
+    savedLab = null;
+  }
+  applyLabMode(savedLab === "extract" ? "extract" : "embed");
+  renderBinList();
   refreshIntel();
-  window.setTimeout(() => runSynth(false), 30);
 }
 
 wireUi();

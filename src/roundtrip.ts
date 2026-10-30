@@ -1,4 +1,5 @@
 import { capacity, embed, extract, permuteIndex, stripFrame, toUtf8, fromUtf8, type StegConfig } from "./stegano.ts";
+import { joinEnvelopes, packFile, recoverFiles } from "./binfile.ts";
 import { decodePng, encodePng, pngToImageData } from "./png.ts";
 import { crypt as opensslCrypt } from "../server/openssl.ts";
 
@@ -139,6 +140,19 @@ try {
   assert(plain.length === envelope.length, "decrypted envelope length");
   assert(new TextDecoder().decode(plain.subarray(0, 7)) === "DDFILE\n", "ddfile magic");
   assert(plain[plain.length - raw.length] === 0xff, "jpeg magic after decrypt");
+}
+
+{
+  const a = packFile("note.txt", "text/plain", new TextEncoder().encode("alpha"));
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 1, 2, 3, 4]);
+  const b = packFile("shot.jpg", "image/jpeg", jpeg);
+  const joined = joinEnvelopes([a, b]);
+  const files = recoverFiles(joined);
+  assert(files.length === 2, "two ddfiles");
+  assert(files[0].name === "note.txt" && new TextDecoder().decode(files[0].bytes) === "alpha", "text file");
+  assert(files[1].name === "shot.jpg" && files[1].bytes[0] === 0xff && files[1].bytes[1] === 0xd8, "jpeg file");
+  const one = recoverFiles(a.envelope);
+  assert(one.length === 1 && one[0].name === "note.txt", "single ddfile still unpacks");
 }
 
 console.log("ok", configs.length, "roundtrips");

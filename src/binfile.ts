@@ -1,4 +1,4 @@
-import { hexDump } from "./stegano";
+import { hexDump } from "./stegano.ts";
 
 export type PackedFile = {
   name: string;
@@ -63,9 +63,10 @@ export function packFile(name: string, mime: string, bytes: Uint8Array): PackedF
   };
 }
 
-export function unpackFile(data: Uint8Array): PackedFile | null {
-  if (!startsWith(data, MAGIC)) return null;
-  const rest = data.subarray(MAGIC.length);
+function unpackOne(data: Uint8Array, offset: number): { file: PackedFile; next: number } | null {
+  const slice = data.subarray(offset);
+  if (!startsWith(slice, MAGIC)) return null;
+  const rest = slice.subarray(MAGIC.length);
   const nl = indexOfByte(rest, 10);
   if (nl < 0) return null;
   try {
@@ -74,21 +75,57 @@ export function unpackFile(data: Uint8Array): PackedFile | null {
       mime?: string;
       n?: number;
     };
-    let body = rest.subarray(nl + 1);
-    if (typeof meta.n === "number" && body.length !== meta.n) {
-      try {
-        const decoded = base64ToBytes(new TextDecoder("utf-8", { fatal: true }).decode(body));
-        if (decoded.length === meta.n) body = decoded;
-      } catch {
-        /* keep raw body — not the old Base64 envelope */
+    const rawBody = rest.subarray(nl + 1);
+    let body = rawBody;
+    let bodyBytes = rawBody.length;
+    if (typeof meta.n === "number") {
+      if (rawBody.length >= meta.n) {
+        body = rawBody.subarray(0, meta.n);
+        bodyBytes = meta.n;
+      } else {
+        try {
+          const decoded = base64ToBytes(new TextDecoder("utf-8", { fatal: true }).decode(rawBody));
+          if (decoded.length === meta.n) {
+            body = decoded;
+            bodyBytes = rawBody.length;
+          }
+        } catch {
+          /* keep raw body — not the old Base64 envelope */
+        }
       }
     }
     const name = meta.name?.trim() || "payload.bin";
     const mime = meta.mime?.trim() || "application/octet-stream";
-    return { name, mime, bytes: body, envelope: data };
+    const consumed = MAGIC.length + nl + 1 + bodyBytes;
+    return {
+      file: { name, mime, bytes: body, envelope: data.subarray(offset, offset + consumed) },
+      next: offset + consumed,
+    };
   } catch {
     return null;
   }
+}
+
+export function unpackFile(data: Uint8Array): PackedFile | null {
+  return unpackOne(data, 0)?.file ?? null;
+}
+
+export function joinEnvelopes(files: PackedFile[]): Uint8Array {
+  return concat(files.map((file) => file.envelope));
+}
+
+export function unpackFiles(data: Uint8Array): PackedFile[] {
+  const start = locateBytes(data, MAGIC, 32);
+  if (start < 0) return [];
+  const files: PackedFile[] = [];
+  let offset = start;
+  while (offset < data.length) {
+    const parsed = unpackOne(data, offset);
+    if (!parsed) break;
+    files.push(parsed.file);
+    offset = parsed.next;
+  }
+  return files;
 }
 
 export function guessMime(name: string, reported = ""): string {
@@ -181,20 +218,24 @@ function extForMime(mime: string): string {
   return mime.split("/")[1]?.split("+")[0] || "bin";
 }
 
-export function recoverFile(data: Uint8Array): PackedFile | null {
-  const dd = locateBytes(data, MAGIC, 32);
-  const sliced = dd >= 0 ? data.subarray(dd) : data;
-  const packed = unpackFile(sliced);
-  if (packed) {
-    const head = sniffMagic(packed.bytes, true);
-    if (head && (packed.mime === "application/octet-stream" || packed.mime === "")) {
-      return { ...packed, mime: head };
-    }
-    return packed;
+function refineMime(packed: PackedFile): PackedFile {
+  const head = sniffMagic(packed.bytes, true);
+  if (head && (packed.mime === "application/octet-stream" || packed.mime === "")) {
+    return { ...packed, mime: head };
   }
+  return packed;
+}
+
+export function recoverFile(data: Uint8Array): PackedFile | null {
+  return recoverFiles(data)[0] ?? null;
+}
+
+export function recoverFiles(data: Uint8Array): PackedFile[] {
+  const packed = unpackFiles(data).map(refineMime);
+  if (packed.length) return packed;
   const media = sliceMedia(data);
-  if (!media) return null;
-  return { name: `payload.${extForMime(media.mime)}`, mime: media.mime, bytes: media.bytes, envelope: data };
+  if (!media) return [];
+  return [{ name: `payload.${extForMime(media.mime)}`, mime: media.mime, bytes: media.bytes, envelope: data }];
 }
 
 export function dumpEnvelope(packed: PackedFile): string {

@@ -29,7 +29,7 @@
     <div class="crt" aria-hidden="true"></div>
     <div class="vignette" aria-hidden="true"></div>
 
-    <div id="app">
+    <div id="app" data-lab="embed">
       <header class="topbar">
         <div class="brand">
           <span class="mark">▣</span>
@@ -40,6 +40,13 @@
         </div>
         <div class="classification">UNCLASSIFIED // TRAINING</div>
         <div class="top-actions">
+          <div class="lab-switch">
+            <span class="lab-label">MODE</span>
+            <div class="lab-mode" id="lab-mode" role="tablist" aria-label="Lab mode">
+              <button type="button" data-lab="embed" class="active">EMBED</button>
+              <button type="button" data-lab="extract">EXTRACT</button>
+            </div>
+          </div>
           <button type="button" id="lib-open" class="info-btn">LIB</button>
           <button type="button" id="info-open" class="info-btn">INFO</button>
           <div class="clock-block">
@@ -49,8 +56,8 @@
         </div>
       </header>
 
-      <main class="workspace">
-        <section class="panel viewport-panel" aria-label="Carrier image">
+      <main class="workspace" id="workspace">
+        <section class="panel viewport-panel" data-col="carrier" aria-label="Carrier image">
           <div class="panel-head">
             <span class="tag">01</span>
             <h2>CARRIER</h2>
@@ -73,8 +80,8 @@
             <div id="dropzone" class="dropzone">
               <canvas id="stage" width="768" height="512"></canvas>
               <div id="empty" class="empty-hint">
-                <p>DROP IMAGE // FILE // CLIPBOARD</p>
-                <p class="dim">PNG preferred. JPEG/WebP accepted, export is always PNG.</p>
+                <p id="empty-lead">DROP OR SYNTH A CARRIER</p>
+                <p id="empty-dim" class="dim">Hide a payload in PNG LSBs. PNG preferred; export is always PNG.</p>
               </div>
             </div>
             <div class="ingress">
@@ -82,6 +89,7 @@
                 <input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/*" />
                 LOCAL FILE
               </label>
+              <button type="button" id="gpt-open" aria-expanded="false" aria-controls="gpt-pane">GPT</button>
               <form id="url-form" class="url-form">
                 <input
                   id="url"
@@ -92,6 +100,15 @@
                 />
                 <button type="submit">PULL</button>
               </form>
+            </div>
+            <div id="gpt-pane" class="gpt-pane" hidden>
+              <label class="sr-only" for="gpt-prompt">GPT carrier prompt</label>
+              <textarea
+                id="gpt-prompt"
+                spellcheck="false"
+                placeholder="describe a carrier — wet cobblestones at night, film grain, wide shot"
+              ></textarea>
+              <button type="button" id="gpt-gen" class="primary">SEND</button>
             </div>
             <div class="synth-bar">
               <label class="dim-field">
@@ -121,8 +138,8 @@
             </div>
           </div>
         </section>
-
-        <section class="panel intel-panel" aria-label="Capacity and stats">
+        <div class="splitter" data-split="0" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize carrier and intel"></div>
+        <section class="panel intel-panel" data-col="intel" aria-label="Capacity and stats">
           <div class="panel-head">
             <span class="tag">02</span>
             <h2>INTEL</h2>
@@ -176,21 +193,19 @@ PIPE   TEXT → LSB  (set a key to encrypt first)
 MATCH  extract bits/channels/cipher/key must match embed</pre>
           </div>
         </section>
-
-        <section id="payload-panel" class="panel payload-panel" data-mode="msg" aria-label="Hidden message">
+        <div class="splitter" data-split="1" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize intel and payload"></div>
+        <section id="payload-panel" class="panel payload-panel" data-col="payload" data-mode="msg" aria-label="Hidden message">
           <div class="panel-head">
             <span class="tag">03</span>
             <h2 id="payload-title">PAYLOAD</h2>
             <div class="io-mode" id="io-mode" role="tablist" aria-label="Input mode">
               <button type="button" data-mode="msg" class="active">MSG</button>
               <button type="button" data-mode="bin">BIN</button>
-              <button type="button" data-mode="gpt">GPT</button>
             </div>
             <span id="payload-meta" class="payload-meta">0 B</span>
             <div class="payload-actions">
               <button type="button" id="embed" class="primary">EMBED</button>
               <button type="button" id="extract">EXTRACT</button>
-              <button type="button" id="gpt-gen" class="primary">GPT GEN</button>
               <span id="export-wrap" class="tip-wrap">
                 <button type="button" id="export">EXPORT PNG</button>
               </span>
@@ -245,22 +260,18 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <div id="bin-pane" class="bin-pane">
               <div class="bin-row">
                 <label class="file-btn">
-                  <input id="bin-file" type="file" />
-                  LOAD BINARY
+                  <input id="bin-file" type="file" multiple />
+                  ADD FILES
                 </label>
-                <button type="button" id="bin-dl" hidden>DOWNLOAD</button>
-                <span id="bin-info" class="bin-info">NO FILE ARMED — AUDIO, PDF, ZIP…</span>
+                <button type="button" id="bin-dl" hidden>DOWNLOAD ALL</button>
+                <button type="button" id="bin-clear" hidden>CLEAR</button>
+                <span id="bin-info" class="bin-info">DROP FILES HERE — IMAGES SHOW BEFORE EMBED</span>
               </div>
-              <div id="bin-preview" class="bin-preview">
-                <audio id="bin-audio" class="bin-audio" controls hidden></audio>
-                <img id="bin-image" class="bin-image" alt="" hidden />
-                <video id="bin-video" class="bin-video" controls hidden></video>
-                <iframe id="bin-pdf" class="bin-pdf" title="Hidden PDF" hidden></iframe>
-              </div>
-              <pre id="bin-dump" class="bin-dump" hidden></pre>
+              <div id="bin-list" class="bin-list" data-count="0"></div>
               <p class="bin-note">
-                PIPE: FILE → LSB (raw bytes). A small DDFILE header is the only extra. Short clips fit a
-                768×512 / 1 LSB carrier; bump W×H or bits/channel for larger files.
+                PIPE: FILES → LSB (raw bytes). Each file gets a small DDFILE header. Drop images onto this
+                column to preview them, then EMBED. Short clips fit a 768×512 / 1 LSB carrier; bump W×H or
+                bits/channel for larger files.
               </p>
             </div>
             <div id="status" class="status" role="status">STANDBY // LOAD A CARRIER TO BEGIN</div>
@@ -293,12 +304,20 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             </p>
           </section>
           <section>
+            <h3>MODES</h3>
+            <p>
+              Toggle <strong>EMBED</strong> or <strong>EXTRACT</strong> in the header. Embed builds a carrier
+              (load, synth, or GPT) and hides a payload. Extract opens a stego PNG and recovers what was hidden.
+              Loading a framed PNG switches to EXTRACT; a clean carrier switches to EMBED.
+            </p>
+          </section>
+          <section>
             <h3>CARRIER</h3>
             <p>
               Drag to pan, mouse wheel to zoom (pixelates past 150% so you can inspect LSBs). <strong>FIT</strong> frames
               the carrier. <strong>SNAP</strong> copies the current pixel size into W×H; <strong>RESIZE</strong> resamples
               the loaded carrier to that size (this destroys any embedded payload). Set <strong>W × H</strong>
-              (16–4096) before SYNTH SAT or GPT GEN. JPEG/WebP are accepted as input; export is always lossless PNG.
+              (16–4096) before SYNTH SAT or GPT. JPEG/WebP are accepted as input; export is always lossless PNG.
               <strong>PULL</strong> fetches through this lab’s server so LAN/HTTP carriers work even without CORS.
             </p>
           </section>
@@ -315,21 +334,22 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
           <section>
             <h3>GPT CARRIER</h3>
             <p>
-              Toggle <strong>GPT</strong> on the payload strip. The box becomes a prompt. <strong>GPT GEN</strong>
+              On the carrier panel, <strong>GPT</strong> (next to LOCAL FILE) opens a prompt. <strong>SEND</strong>
               calls OpenAI <code>gpt-image-1</code> with the key from the local <code>[stegano]</code> creds block
-              (server-side only). Photos with grain and detail hide LSBs better than flat graphics. After it lands,
-              switch back to <strong>MSG</strong> and type the payload to embed.
+              (server-side only). Size comes from the synth <strong>W × H</strong> fields. Photos with grain and
+              detail hide LSBs better than flat graphics. The image lands as SRC; type the payload in MSG and EMBED.
             </p>
           </section>
           <section>
             <h3>BINARY / AUDIO</h3>
             <p>
-              Toggle <strong>BIN</strong>, load any file (wav, mp3, pdf, zip…). A tiny <code>DDFILE</code> header
-              plus the <strong>raw bytes</strong> go into the LSBs — no Base64 on the file itself (UTF-8 is only
-              for text messages). <strong>EXTRACT</strong> restores the original bytes and reconstructs a preview —
-              audio player, nested image, video, or PDF — while keeping the DDFILE header and hex dump.
-              Loading a stego PNG only holds the frame; it does not dump ciphertext into MSG. A key encrypts
-              those bytes with OpenSSL first. Scaling the carrier after embed will destroy the file.
+              Toggle <strong>BIN</strong> or drop files onto the payload column. Add as many as the carrier
+              can hold — images preview as thumbnails before you <strong>EMBED</strong>. Each file gets a tiny
+              <code>DDFILE</code> header plus the <strong>raw bytes</strong> (no Base64). <strong>EXTRACT</strong>
+              restores every file with its preview. <strong>OPEN</strong> shows a file in a new tab as a
+              <code>data:</code> Base64 URL. Loading a stego PNG only holds the frame; it does not dump
+              ciphertext into MSG. A key encrypts those bytes with OpenSSL first. Scaling the carrier after
+              embed will destroy the files.
             </p>
           </section>
           <section>
