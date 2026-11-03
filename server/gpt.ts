@@ -12,42 +12,49 @@ type OpenAiImageResponse = {
   error?: { message?: string; code?: string };
 };
 
-function pickApiSize(width: number, height: number, model: "gpt-image-1" | "dall-e-3"): string {
+// gpt-image-1 shut down 2026-10-23. dall-e-3 shut down 2026-05-12 and the
+// images endpoint now rejects its response_format field on GPT image models.
+const MODELS = ["gpt-image-2.5-flare", "gpt-image-2", "gpt-image-1.5"] as const;
+
+function pickApiSize(width: number, height: number): string {
   const ratio = width / height;
-  if (model === "dall-e-3") {
-    if (ratio > 1.15) return "1792x1024";
-    if (ratio < 0.87) return "1024x1792";
-    return "1024x1024";
-  }
   if (ratio > 1.15) return "1536x1024";
   if (ratio < 0.87) return "1024x1536";
   return "1024x1024";
 }
 
-async function requestModel(
-  key: string,
-  prompt: string,
-  model: "gpt-image-1" | "dall-e-3",
-  width: number,
-  height: number,
-): Promise<GptImageResult> {
-  const apiSize = pickApiSize(width, height, model);
-  const payload: Record<string, unknown> = {
-    model,
-    prompt,
-    size: apiSize,
-    n: 1,
-  };
-  if (model === "gpt-image-1") payload.quality = "medium";
-  else payload.response_format = "b64_json";
+function modelUnavailable(message: string): boolean {
+  return /model|access|not.?found|unsupported|shut.?down|deprecated|does not exist/i.test(message);
+}
 
+async function imagePayload(item: { b64_json?: string; url?: string } | undefined): Promise<{ b64: string; mime: string }> {
+  if (item?.b64_json) return { b64: item.b64_json, mime: "image/png" };
+  if (!item?.url) throw new Error("GPT RETURNED NO IMAGE");
+  const response = await fetch(item.url, { signal: AbortSignal.timeout(60_000) });
+  if (!response.ok) throw new Error(`GPT IMAGE URL HTTP ${response.status}`);
+  const header = response.headers.get("content-type")?.split(";")[0]?.trim() || "";
+  const mime = header.startsWith("image/") ? header : "image/png";
+  const b64 = Buffer.from(await response.arrayBuffer()).toString("base64");
+  if (!b64) throw new Error("GPT RETURNED NO IMAGE");
+  return { b64, mime };
+}
+
+async function requestModel(key: string, prompt: string, model: string, width: number, height: number): Promise<GptImageResult> {
+  const apiSize = pickApiSize(width, height);
   const response = await fetch("https://api.openai.com/v1/images/generations", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      model,
+      prompt,
+      size: apiSize,
+      n: 1,
+      quality: "medium",
+      output_format: "png",
+    }),
     signal: AbortSignal.timeout(180_000),
   });
 
@@ -55,9 +62,8 @@ async function requestModel(
   if (!response.ok) {
     throw new Error(body.error?.message || `GPT IMAGE HTTP ${response.status}`);
   }
-  const b64 = body.data?.[0]?.b64_json;
-  if (!b64) throw new Error("GPT RETURNED NO IMAGE");
-  return { b64, mime: "image/png", apiSize, model };
+  const image = await imagePayload(body.data?.[0]);
+  return { ...image, apiSize, model };
 }
 
 export async function generateGptImage(prompt: string, width: number, height: number): Promise<GptImageResult> {
@@ -66,11 +72,15 @@ export async function generateGptImage(prompt: string, width: number, height: nu
   if (trimmed.length > 8000) throw new Error("PROMPT TOO LONG");
 
   const key = readCredsKey("stegano");
-  try {
-    return await requestModel(key, trimmed, "gpt-image-1", width, height);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "";
-    if (!/model|access|not.?found|unsupported/i.test(detail)) throw error;
-    return await requestModel(key, trimmed, "dall-e-3", width, height);
+  const failures: string[] = [];
+  for (const model of MODELS) {
+    try {
+      return await requestModel(key, trimmed, model, width, height);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "GPT IMAGE FAILED";
+      failures.push(detail);
+      if (!modelUnavailable(detail)) break;
+    }
   }
+  throw new Error(failures.at(-1) || "GPT IMAGE FAILED");
 }

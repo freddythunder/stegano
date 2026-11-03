@@ -37,8 +37,11 @@ import {
   type LibraryFolder,
   type LibraryItem,
 } from "./library";
+import { openMemoryDb, type MemoryDb, type SqlRun, type SqlResultSet } from "./sqlengine";
+import { isSqliteBytes, packDb, packedDbSize, unpackDb } from "./sqldb";
 
 type View = "carrier" | "stego" | "lsb" | "delta";
+type IoMode = "msg" | "bin" | "sql";
 
 type ArmedBin = {
   packed: PackedFile;
@@ -57,9 +60,15 @@ const state = {
   view: "carrier" as View,
   bits: 1 as BitsPerChannel,
   channels: { r: true, g: true, b: true } as ChannelMask,
-  io: "msg" as "msg" | "bin",
+  io: "msg" as IoMode,
   bins: [] as ArmedBin[],
   binFromExtract: false,
+  sql: {
+    db: null as MemoryDb | null,
+    name: "",
+    bytes: null as Uint8Array | null,
+    imageBytes: null as Uint8Array | null,
+  },
   heldFrame: null as Uint8Array | null,
   lab: "embed" as "embed" | "extract",
 };
@@ -287,6 +296,11 @@ function payloadBytes(): number {
     const raw = state.bins.reduce((sum, item) => sum + item.packed.envelope.length, 0);
     return estimateWiredBytes(raw, keyed());
   }
+  if (state.io === "sql") {
+    if (state.sql.bytes) return estimateWiredBytes(packedDbSize(state.sql.name, state.sql.bytes.length), keyed());
+    if (!el<HTMLTextAreaElement>("message").value && state.heldFrame) return state.heldFrame.length;
+    return 0;
+  }
   const text = el<HTMLTextAreaElement>("message").value;
   if (!text && state.heldFrame) return state.heldFrame.length;
   const n = toUtf8(text).length;
@@ -334,14 +348,23 @@ function setBusy(busy: boolean): void {
   el<HTMLInputElement>("bin-file").disabled = busy;
   syncExportButton();
   syncBinDownload();
+  syncSqlControls();
 }
 
 const MSG_PLACEHOLDER = "enter dead-drop text — embed writes LSBs";
 const EXTRACT_PLACEHOLDER = "recovered text lands here after EXTRACT";
+const SQL_SAMPLE = `CREATE TABLE IF NOT EXISTS notes (
+  id INTEGER PRIMARY KEY,
+  note TEXT NOT NULL
+);
+INSERT INTO notes (note) VALUES ('field note');
+SELECT * FROM notes;`;
+const SQL_INSPECT = "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name;";
 
 function payloadTitle(): string {
   if (state.lab === "extract") return "RECOVERED";
   if (state.io === "bin") return "BINARY";
+  if (state.io === "sql") return "SQL";
   return "PAYLOAD";
 }
 
@@ -379,7 +402,12 @@ function applyLabMode(mode: "embed" | "extract", silent = false): void {
   }
 }
 
-function applyIoMode(mode: "msg" | "bin"): void {
+function asIoMode(value: string | undefined): IoMode {
+  if (value === "bin" || value === "sql") return value;
+  return "msg";
+}
+
+function applyIoMode(mode: IoMode): void {
   state.io = mode;
   el("payload-panel").setAttribute("data-mode", mode);
   el("payload-title").textContent = payloadTitle();
@@ -395,15 +423,28 @@ function refreshPipe(): void {
   const pipe = el("pipe-label");
   const proto = el("proto");
   const filePipe = state.io === "bin";
+  const sqlPipe = state.io === "sql";
   const many = state.bins.length !== 1;
   if (keyed()) {
     const cipher = cipherValue() || "cipher";
-    pipe.textContent = filePipe ? `${many ? "FILES" : "FILE"} → ENC → LSB` : "TEXT → ENC → LSB";
+    pipe.textContent = filePipe
+      ? `${many ? "FILES" : "FILE"} → ENC → LSB`
+      : sqlPipe
+        ? "SQLITE → ENC → LSB"
+        : "TEXT → ENC → LSB";
     pipe.classList.add("hot");
+    const envelope = sqlPipe ? "DDDB envelope · " : filePipe ? "DDFILE envelope · " : "";
     proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · RAW OPENSSL
 WALK   header sequential · payload bits scattered (seeded Feistel)
-PIPE   ${filePipe ? "DDFILE envelope · " : ""}${cipher} · pbkdf2 / 10000 iter · salt · no Base64
+PIPE   ${envelope}${cipher} · pbkdf2 / 10000 iter · salt · no Base64
 MATCH  bits, channels, cipher, and key must match`;
+  } else if (sqlPipe) {
+    pipe.textContent = "SQLITE → LSB";
+    pipe.classList.remove("hot");
+    proto.textContent = `FRAME  DDRS · u32be LEN · u32be SEED · DDDB + SQLITE
+WALK   header sequential · payload bits scattered (seeded Feistel)
+PIPE   SQLITE → LSB  (sql.js runs the file in memory)
+MATCH  extract bits/channels must match embed`;
   } else if (filePipe) {
     pipe.textContent = many ? "FILES → LSB" : "FILE → LSB";
     pipe.classList.remove("hot");
@@ -529,8 +570,10 @@ function refreshIntel(): void {
     link.className = "link-state";
     el("payload-meta").textContent = ioMeta(used, wireNote);
     refreshBinInfo();
+    refreshSqlInfo();
     syncExportButton();
     syncBinDownload();
+    syncSqlControls();
     return;
   }
 
@@ -551,6 +594,7 @@ function refreshIntel(): void {
   el("st-used").textContent = `${used.toLocaleString()} B${wireNote}`;
   el("payload-meta").textContent = ioMeta(used, wireNote);
   refreshBinInfo();
+  refreshSqlInfo();
 
   const framed = state.original ? hasFrame(state.stego ?? state.original, config()) : false;
   if (framed) {
@@ -572,6 +616,7 @@ function refreshIntel(): void {
 
   syncExportButton();
   syncBinDownload();
+  syncSqlControls();
 }
 
 function fileStatus(files: PackedFile[]): string {
@@ -582,6 +627,7 @@ function fileStatus(files: PackedFile[]): string {
 
 async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   const box = el<HTMLTextAreaElement>("message");
+  if (await presentDatabase(bytes, prefix, false)) return;
   const direct = recoverFiles(bytes);
   if (direct.length) {
     state.heldFrame = null;
@@ -594,6 +640,7 @@ async function revealPayload(bytes: Uint8Array, prefix: string): Promise<void> {
   if (keyed()) {
     try {
       const plain = await cryptRaw("decrypt", cipherValue(), keyValue(), bytes);
+      if (await presentDatabase(plain, prefix, true)) return;
       const packed = recoverFiles(plain);
       if (packed.length) {
         state.heldFrame = null;
@@ -731,6 +778,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
     state.heldFrame = found.payload;
     el<HTMLTextAreaElement>("message").value = "";
     clearBin();
+    clearSql();
     applyIoMode("msg");
     applyLabMode("extract", true);
     setView("stego");
@@ -747,6 +795,7 @@ async function ingest(image: ImageData, name: string, persist: PersistTarget = "
   state.original = image;
   state.stego = null;
   state.heldFrame = null;
+  detachSqlFromImage();
   applyLabMode("embed", true);
   setView("carrier");
   syncSizeControls(image.width, image.height);
@@ -828,17 +877,32 @@ async function onEmbed(): Promise<void> {
       setStatus("NO BINARY ARMED — DROP FILES ONTO PAYLOAD OR USE ADD FILES", "err");
       return;
     }
+    if (state.io === "sql" && !state.sql.db) {
+      setStatus("NO DATABASE — NEW OR LOAD A SQLITE FILE", "err");
+      return;
+    }
     setBusy(true);
     let payload: Uint8Array;
+    let plainNote = "";
     const filePayload = state.io === "bin" ? joinEnvelopes(state.bins.map((item) => item.packed)) : null;
-    if (filePayload) {
+    if (state.io === "sql" && state.sql.db) {
+      const bytes = state.sql.db.export();
+      state.sql.bytes = bytes;
+      payload = packDb(state.sql.name, bytes);
+      plainNote = state.sql.name;
+      if (keyed()) {
+        setStatus(`ENCRYPTING ${cipherValue()} …`);
+        payload = await cryptRaw("encrypt", cipherValue(), keyValue(), payload);
+      }
+    } else if (filePayload) {
       payload = filePayload;
+      plainNote = `${state.bins.length} DDFILE${state.bins.length === 1 ? "" : "S"} RAW`;
       if (keyed()) {
         setStatus(`ENCRYPTING ${cipherValue()} …`);
         payload = await cryptRaw("encrypt", cipherValue(), keyValue(), payload);
       }
     } else {
-      let wire = el<HTMLTextAreaElement>("message").value;
+      const wire = el<HTMLTextAreaElement>("message").value;
       if (keyed()) {
         setStatus(`ENCRYPTING ${cipherValue()} …`);
         payload = await cryptRaw("encrypt", cipherValue(), keyValue(), toUtf8(wire));
@@ -848,16 +912,12 @@ async function onEmbed(): Promise<void> {
     }
     state.stego = embed(state.original, payload, config());
     state.heldFrame = null;
+    if (state.io === "sql" && state.sql.bytes) state.sql.imageBytes = state.sql.bytes.slice();
     setView("stego");
     refreshView();
     refreshIntel();
-    const pipe = keyed()
-      ? ` · ${cipherValue()}`
-      : filePayload
-        ? ` · ${state.bins.length} DDFILE${state.bins.length === 1 ? "" : "S"} RAW`
-        : "";
-    const stem = state.name.replace(/\.[^.]+$/, "") || "deaddrop";
-    const saved = state.stego ? await persistPng("output", `${stem}.stego.png`, state.stego) : null;
+    const pipe = keyed() ? ` · ${cipherValue()}` : plainNote ? ` · ${plainNote}` : "";
+    const saved = state.stego ? await persistPng("output", payloadPngName(state.name), state.stego) : null;
     setStatus(
       `EMBED COMPLETE · ${payload.length} B INTO ${state.name}${pipe}${shelfNote("output", saved, " · EXPORT PNG TO KEEP IT")}`,
       "ok",
@@ -891,6 +951,7 @@ function ioMeta(used: number, wireNote: string): string {
     const n = state.bins.length;
     return `${n} FILE${n === 1 ? "" : "S"} · ${formatBytes(used)}${wireNote}`;
   }
+  if (state.io === "sql" && state.sql.bytes) return `SQL · ${formatBytes(used)}${wireNote}`;
   return `${used.toLocaleString()} B${wireNote}`;
 }
 
@@ -1209,6 +1270,11 @@ async function onGptGen(): Promise<void> {
   }
 }
 
+function payloadPngName(name: string): string {
+  const stem = name.replace(/\.[^.]+$/, "").replace(/(?:\.stego)+$/i, "") || "deaddrop";
+  return `${stem}.png`;
+}
+
 async function onExport(): Promise<void> {
   const blocked = overflowReason();
   if (blocked) {
@@ -1222,8 +1288,7 @@ async function onExport(): Promise<void> {
   }
   try {
     const blob = await imageDataToBlob(source);
-    const stem = state.name.replace(/\.[^.]+$/, "") || "deaddrop";
-    const filename = `${stem}.stego.png`;
+    const filename = payloadPngName(state.name);
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -1235,6 +1300,293 @@ async function onExport(): Promise<void> {
   }
 }
 
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function sqlDirty(): boolean {
+  if (!state.sql.db || !state.sql.bytes) return false;
+  if (!state.sql.imageBytes) return true;
+  return !sameBytes(state.sql.bytes, state.sql.imageBytes);
+}
+
+function refreshSqlInfo(): void {
+  const node = el("sql-info");
+  if (!state.sql.db || !state.sql.bytes) {
+    node.textContent = "NO DATABASE — NEW OR LOAD A SQLITE FILE";
+    return;
+  }
+  const size = formatBytes(state.sql.bytes.length);
+  const cap = currentCap();
+  const wired = estimateWiredBytes(packedDbSize(state.sql.name, state.sql.bytes.length), keyed());
+  const over = cap && wired > cap.payloadBytes ? "  ·  OVER SLOT" : "";
+  if (!state.sql.imageBytes) {
+    node.textContent = `${state.sql.name}  ·  ${size} IN MEMORY  ·  NOT IN IMAGE${over}`;
+    return;
+  }
+  node.textContent = sqlDirty()
+    ? `${state.sql.name}  ·  ${size} IN MEMORY  ·  CHANGED — WRITE IMAGE${over}`
+    : `${state.sql.name}  ·  ${size} IN MEMORY  ·  MATCHES IMAGE${over}`;
+}
+
+function syncSqlControls(): void {
+  const has = Boolean(state.sql.db);
+  const commit = el<HTMLButtonElement>("sql-commit");
+  const reason = overflowReason();
+  el<HTMLButtonElement>("sql-dl").hidden = !has;
+  el<HTMLButtonElement>("sql-run").disabled = uiBusy || !has;
+  el<HTMLButtonElement>("sql-schema").disabled = uiBusy || !has;
+  el<HTMLButtonElement>("sql-new").disabled = uiBusy;
+  el<HTMLInputElement>("sql-file").disabled = uiBusy;
+  commit.disabled = uiBusy || !has || !state.original || Boolean(reason);
+  commit.classList.toggle("dirty", has && sqlDirty());
+  commit.title = reason && has ? reason : "Write the in-memory database into the carrier";
+}
+
+function clearSql(): void {
+  state.sql.db?.close();
+  state.sql.db = null;
+  state.sql.name = "";
+  state.sql.bytes = null;
+  state.sql.imageBytes = null;
+  const box = document.getElementById("sql-input");
+  if (box instanceof HTMLTextAreaElement) box.value = "";
+  renderSqlOut(null);
+}
+
+function detachSqlFromImage(): void {
+  state.sql.imageBytes = null;
+}
+
+function sqlCell(value: SqlRun["sets"][number]["values"][number][number]): { text: string; kind: string } {
+  if (value === null) return { text: "NULL", kind: "null" };
+  if (value instanceof Uint8Array) {
+    const hex = [...value.subarray(0, 12)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const more = value.length > 12 ? "…" : "";
+    return { text: `x'${hex}${more}' · ${value.length} B`, kind: "blob" };
+  }
+  const text = String(value);
+  return { text: text.length > 400 ? `${text.slice(0, 400)}…` : text, kind: typeof value === "number" ? "num" : "text" };
+}
+
+function sqlTable(set: SqlResultSet, index: number, count: number): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "sql-result";
+  const meta = document.createElement("div");
+  meta.className = "sql-result-meta";
+  const shown = set.values.length === set.total ? `${set.total} ROW${set.total === 1 ? "" : "S"}` : `SHOWING ${set.values.length} OF ${set.total}`;
+  meta.textContent = count > 1 ? `RESULT ${index + 1} · ${shown}` : shown;
+  const wrap = document.createElement("div");
+  wrap.className = "sql-table-wrap";
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of set.columns) {
+    const th = document.createElement("th");
+    th.textContent = column;
+    headRow.append(th);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  if (!set.values.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = Math.max(1, set.columns.length);
+    td.className = "null";
+    td.textContent = "NO ROWS";
+    tr.append(td);
+    body.append(tr);
+  }
+  for (const row of set.values) {
+    const tr = document.createElement("tr");
+    row.forEach((value) => {
+      const td = document.createElement("td");
+      const cell = sqlCell(value);
+      td.textContent = cell.text;
+      td.className = cell.kind;
+      tr.append(td);
+    });
+    body.append(tr);
+  }
+  table.append(head, body);
+  wrap.append(table);
+  block.append(meta, wrap);
+  return block;
+}
+
+function renderSqlOut(run: SqlRun | null): void {
+  const out = document.getElementById("sql-out");
+  if (!out) return;
+  out.replaceChildren();
+  if (!run) {
+    const hint = document.createElement("p");
+    hint.className = "sql-hint";
+    hint.textContent = state.sql.db
+      ? "RUN SQL AGAINST THE IN-MEMORY DATABASE"
+      : "NEW OR LOAD A SQLITE FILE — IT STAYS IN MEMORY UNTIL WRITE IMAGE";
+    out.append(hint);
+    return;
+  }
+  if (!run.ok) {
+    const err = document.createElement("p");
+    err.className = "sql-error";
+    err.textContent = run.applied
+      ? `${run.error} · EARLIER STATEMENTS IN THIS BUFFER WERE KEPT`
+      : run.error;
+    out.append(err);
+  }
+  if (!run.sets.length && run.ok) {
+    const ok = document.createElement("p");
+    ok.className = "sql-ok";
+    ok.textContent = run.rowsModified
+      ? `OK · ${run.rowsModified} ROW${run.rowsModified === 1 ? "" : "S"} CHANGED`
+      : "OK";
+    out.append(ok);
+    return;
+  }
+  run.sets.forEach((set, index) => out.append(sqlTable(set, index, run.sets.length)));
+  if (run.ok && run.rowsModified && run.sets.length) {
+    const foot = document.createElement("p");
+    foot.className = "sql-ok";
+    foot.textContent = `${run.rowsModified} ROW${run.rowsModified === 1 ? "" : "S"} CHANGED`;
+    out.append(foot);
+  }
+}
+
+async function presentDatabase(bytes: Uint8Array, prefix: string, encrypted: boolean): Promise<boolean> {
+  const db = unpackDb(bytes);
+  if (!db) return false;
+  await mountSql(db.name, db.bytes, true);
+  state.heldFrame = null;
+  const tail = encrypted ? " · DECRYPTED" : "";
+  setStatus(`${prefix} · SQLITE ${db.name} · ${formatBytes(db.bytes.length)}${tail}`, "ok");
+  return true;
+}
+
+async function mountSql(name: string, bytes: Uint8Array | null, fromImage: boolean): Promise<void> {
+  setBusy(true);
+  setStatus("OPENING SQLITE IN MEMORY …");
+  try {
+    const db = await openMemoryDb(name, bytes ?? undefined);
+    state.sql.db?.close();
+    state.sql.db = db;
+    state.sql.name = db.name;
+    const snapshot = db.export();
+    state.sql.bytes = snapshot;
+    state.sql.imageBytes = fromImage ? snapshot.slice() : null;
+    applyIoMode("sql");
+    const box = el<HTMLTextAreaElement>("sql-input");
+    if (fromImage && !box.value.trim()) {
+      box.value = SQL_INSPECT;
+      const look = db.run(SQL_INSPECT);
+      state.sql.bytes = look.bytes;
+      state.sql.imageBytes = look.bytes.slice();
+      renderSqlOut(look);
+    } else {
+      renderSqlOut(null);
+    }
+    refreshIntel();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "SQLITE OPEN FAILED";
+    setStatus(detail, "err");
+    throw error;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function executeSql(sql: string): Promise<void> {
+  const db = state.sql.db;
+  if (!db) {
+    setStatus("NO DATABASE — NEW OR LOAD A SQLITE FILE", "err");
+    return;
+  }
+  const text = sql.trim();
+  if (!text) {
+    setStatus("SQL EMPTY", "err");
+    return;
+  }
+  setBusy(true);
+  setStatus("SQL …");
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  const started = performance.now();
+  try {
+    const previous = state.sql.bytes;
+    const run = db.run(text);
+    const mutated = !previous || !sameBytes(previous, run.bytes);
+    state.sql.bytes = run.bytes;
+    renderSqlOut(run);
+    refreshIntel();
+    const ms = Math.max(0, Math.round(performance.now() - started));
+    if (!run.ok) {
+      setStatus(`SQL · ${run.error}`, "err");
+      return;
+    }
+    const rows = run.sets.reduce((sum, set) => sum + set.total, 0);
+    const parts = [run.sets.length ? `${rows} ROW${rows === 1 ? "" : "S"}` : "OK"];
+    if (mutated) parts.push(run.rowsModified ? `${run.rowsModified} CHANGED` : "CHANGED");
+    const tail = mutated
+      ? " · CHANGED — WRITE IMAGE TO KEEP IT"
+      : state.sql.imageBytes
+        ? ""
+        : " · NOT IN IMAGE";
+    setStatus(`${parts.join(" · ")} · ${ms} ms${tail}`, tail ? "warn" : "ok");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onSqlNew(): Promise<void> {
+  try {
+    await mountSql("payload.sqlite", null, false);
+  } catch {
+    return;
+  }
+  const box = el<HTMLTextAreaElement>("sql-input");
+  if (!box.value.trim()) box.value = SQL_SAMPLE;
+  setStatus("EMPTY SQLITE IN MEMORY · RUN SQL · WRITE IMAGE TO STORE IT", "ok");
+}
+
+async function loadSqlFile(file: File): Promise<void> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!isSqliteBytes(bytes)) {
+    setStatus("NOT A SQLITE FILE — HEADER MUST BE SQLite format 3", "err");
+    return;
+  }
+  try {
+    await mountSql(file.name, bytes, false);
+  } catch {
+    return;
+  }
+  setStatus(`SQLITE LOADED · ${file.name} · ${formatBytes(bytes.length)} IN MEMORY`, "ok");
+}
+
+async function fileLooksSqlite(file: File): Promise<boolean> {
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  return isSqliteBytes(head);
+}
+
+function downloadSql(): void {
+  const db = state.sql.db;
+  if (!db) {
+    setStatus("NO DATABASE", "err");
+    return;
+  }
+  const bytes = db.export();
+  state.sql.bytes = bytes;
+  const blob = blobFromBytes(bytes, "application/vnd.sqlite3");
+  const name = /\.(sqlite3?|db3?)$/i.test(state.sql.name) ? state.sql.name : `${state.sql.name}.sqlite`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  refreshIntel();
+  setStatus(`SAVED ${name} · ${formatBytes(bytes.length)}`, "ok");
+}
+
 function onWipe(): void {
   if (!state.original) return;
   state.stego = null;
@@ -1242,6 +1594,7 @@ function onWipe(): void {
   setView("carrier");
   el<HTMLTextAreaElement>("message").value = "";
   clearBin();
+  clearSql();
   refreshView();
   refreshIntel();
   setStatus("BUFFER WIPED · CARRIER RESTORED", "warn");
@@ -1597,13 +1950,34 @@ function wireUi(): void {
     event.preventDefault();
     payload.classList.remove("drop-files");
     const files = filesFromDrop(event);
+    if (files.length === 1 && (await fileLooksSqlite(files[0]))) {
+      await loadSqlFile(files[0]);
+      return;
+    }
     if (files.length) await loadBinaryFiles(files);
   });
 
   document.querySelectorAll("#io-mode button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      applyIoMode(((btn as HTMLElement).dataset.mode as "msg" | "bin") ?? "msg");
+      applyIoMode(asIoMode((btn as HTMLElement).dataset.mode));
     });
+  });
+  el("sql-new").addEventListener("click", () => void onSqlNew());
+  el("sql-run").addEventListener("click", () => void executeSql(el<HTMLTextAreaElement>("sql-input").value));
+  el("sql-schema").addEventListener("click", () => void executeSql(SQL_INSPECT));
+  el("sql-commit").addEventListener("click", () => void onEmbed());
+  el("sql-dl").addEventListener("click", downloadSql);
+  el<HTMLInputElement>("sql-file").addEventListener("change", async (event) => {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (file) await loadSqlFile(file);
+  });
+  el<HTMLTextAreaElement>("sql-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void executeSql(el<HTMLTextAreaElement>("sql-input").value);
+    }
   });
 
   const onCryptoChange = () => {
@@ -1800,6 +2174,7 @@ function wireUi(): void {
   }
   applyLabMode(savedLab === "extract" ? "extract" : "embed");
   renderBinList();
+  renderSqlOut(null);
   refreshIntel();
 }
 

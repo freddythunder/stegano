@@ -1,6 +1,6 @@
 # DEAD DROP
 
-LSB steganography lab for PNG carriers. Hide a text message or a binary file (mp3, image, pdf, zip…) in the least-significant bits of R/G/B, optionally wrapping the payload with local OpenSSL first.
+LSB steganography lab for PNG carriers. Hide a text message, a binary file (mp3, image, pdf, zip…), or a SQLite database in the least-significant bits of R/G/B, optionally wrapping the payload with local OpenSSL first. The database runs in memory in the browser.
 
 This is a training terminal, not a covert-comms kit. JPEG/WebP can be loaded as a source, but export is always lossless PNG.
 
@@ -13,9 +13,9 @@ This is a training terminal, not a covert-comms kit. JPEG/WebP can be loaded as 
 
 Optional:
 
-- An **OpenAI API key** if you want **GPT GEN** to paint carrier images (`gpt-image-1`, falling back to `dall-e-3`)
+- An **OpenAI API key** if you want **GPT GEN** to paint carrier images (`gpt-image-2.5-flare`)
 
-Runtime npm packages are only the Vite/TypeScript toolchain (`vite`, `typescript`, `@types/node`). There is no separate backend process: the Vite plugin serves `/api/crypt`, `/api/gpt-image`, and `/api/library`.
+Runtime npm packages are the Vite/TypeScript toolchain (`vite`, `typescript`, `@types/node`) and `sql.js` (SQLite compiled to WebAssembly, bundled into the page). There is no database server and no separate backend process: the Vite plugin serves `/api/crypt`, `/api/gpt-image`, and `/api/library`.
 
 ## Install
 
@@ -74,7 +74,8 @@ Generated files under `images/` and `payloads/` stay local (gitignored). Empty f
 4. Payload:
    - **MSG** — type text. Empty key = cleartext in the LSBs.
    - **BIN** — load a file. A small `DDFILE` header plus the raw bytes go into the image.
-   - **GPT** — prompt, then **GPT GEN** to make a carrier; switch back to MSG or BIN to embed.
+   - **SQL** — **NEW** or load a SQLite file. It runs in memory. The SQL buffer queries it; **WRITE IMAGE** or **EMBED** stores the database file back in the PNG (a `DDDB` header plus the SQLite bytes), including later inserts and updates.
+   - **GPT** — prompt, then **GPT GEN** to make a carrier; switch back to MSG, BIN, or SQL to embed.
 5. Optional **CIPHER** + **KEY** runs `openssl enc` (`-pbkdf2 -iter 10000`, raw ciphertext) before embed / after extract.
 6. **EMBED** writes LSBs and shelves a copy in `images/output/`. **EXPORT PNG** downloads it. **EXTRACT** reads the frame back.
 7. **LIB** browses source/output. Opening an output still reconstructs a hidden file on the **BIN** tab (player for audio, preview for images/PDF) and keeps the DDFILE + hex dump.

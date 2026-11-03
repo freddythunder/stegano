@@ -369,7 +369,8 @@ body.col-resizing * {
 .payload-actions button,
 .gpt-pane button,
 .bin-row button,
-.bin-card button {
+.bin-card button,
+.sql-row button {
   font-family: var(--font-ui);
   font-size: 11px;
   letter-spacing: 0.12em;
@@ -390,6 +391,7 @@ body.col-resizing * {
 .gpt-pane button:hover,
 .bin-row button:hover,
 .bin-card button:hover,
+.sql-row button:hover,
 .view-switch button:hover,
 .view-tools button:hover,
 .seg button:hover {
@@ -411,7 +413,8 @@ body.col-resizing * {
 }
 
 .payload-actions .primary,
-.gpt-pane .primary {
+.gpt-pane .primary,
+.sql-row .primary {
   color: var(--bg);
   background: var(--phos);
   border-color: var(--phos);
@@ -422,7 +425,8 @@ body.col-resizing * {
 .synth-bar button:disabled,
 .gpt-pane button:disabled,
 .bin-row button:disabled,
-.bin-card button:disabled {
+.bin-card button:disabled,
+.sql-row button:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
@@ -888,7 +892,9 @@ body.col-resizing * {
 }
 
 .payload-panel[data-mode="bin"] #message,
-.payload-panel:not([data-mode="bin"]) #bin-pane {
+.payload-panel[data-mode="sql"] #message,
+.payload-panel:not([data-mode="bin"]) #bin-pane,
+.payload-panel:not([data-mode="sql"]) #sql-pane {
   display: none;
 }
 
@@ -1150,10 +1156,148 @@ body.col-resizing * {
 }
 
 #message,
-#bin-pane {
+#bin-pane,
+#sql-pane {
   grid-row: 2;
   grid-column: 1;
   min-height: 0;
+}
+
+.sql-pane {
+  padding: 10px 12px;
+  background: #080c09;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sql-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sql-info {
+  color: var(--phos);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+#sql-commit.dirty {
+  color: var(--bg);
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+#sql-input {
+  flex: 1 1 110px;
+  min-height: 96px;
+  width: 100%;
+  resize: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: #080c09;
+  color: var(--phos);
+  font-family: var(--font-data);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 2px;
+  outline: none;
+}
+
+#sql-input::placeholder {
+  color: var(--phos-deep);
+}
+
+.sql-out {
+  flex: 1.15 1 120px;
+  min-height: 96px;
+  overflow: auto;
+}
+
+.sql-hint,
+.sql-ok,
+.sql-error {
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  white-space: pre-wrap;
+}
+
+.sql-hint {
+  color: var(--muted);
+}
+
+.sql-ok {
+  color: var(--phos);
+}
+
+.sql-error {
+  color: var(--red);
+}
+
+.sql-result {
+  margin-bottom: 10px;
+}
+
+.sql-result-meta {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  margin-bottom: 4px;
+}
+
+.sql-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+}
+
+.sql-out table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+}
+
+.sql-out th,
+.sql-out td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
+.sql-out th {
+  position: sticky;
+  top: 0;
+  color: var(--amber);
+  background: #101610;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.sql-out td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sql-out td.null,
+.sql-out td.blob {
+  color: var(--phos-dim);
+}
+
+.sql-out tr:hover td {
+  background: #0e160f;
+}
+
+.sql-note {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 #message {

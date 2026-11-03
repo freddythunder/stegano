@@ -59,7 +59,7 @@ export async function requestGptImage(
     b64: body.b64,
     mime: body.mime || "image/png",
     apiSize: body.apiSize || "",
-    model: body.model || "gpt-image-1",
+    model: body.model || "gpt-image-2.5-flare",
   };
 }
 

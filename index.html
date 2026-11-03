@@ -201,6 +201,7 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <div class="io-mode" id="io-mode" role="tablist" aria-label="Input mode">
               <button type="button" data-mode="msg" class="active">MSG</button>
               <button type="button" data-mode="bin">BIN</button>
+              <button type="button" data-mode="sql">SQL</button>
             </div>
             <span id="payload-meta" class="payload-meta">0 B</span>
             <div class="payload-actions">
@@ -274,6 +275,32 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
                 bits/channel for larger files.
               </p>
             </div>
+            <div id="sql-pane" class="sql-pane">
+              <div class="sql-row">
+                <label class="file-btn" id="sql-load">
+                  <input id="sql-file" type="file" accept=".sqlite,.sqlite3,.db,.db3,application/vnd.sqlite3,application/x-sqlite3" />
+                  LOAD DB
+                </label>
+                <button type="button" id="sql-new">NEW</button>
+                <button type="button" id="sql-schema">SCHEMA</button>
+                <button type="button" id="sql-run" class="primary">RUN</button>
+                <button type="button" id="sql-commit" title="Write the in-memory database into the carrier">WRITE IMAGE</button>
+                <button type="button" id="sql-dl" hidden>DOWNLOAD</button>
+                <span id="sql-info" class="sql-info">NO DATABASE — NEW OR LOAD A SQLITE FILE</span>
+              </div>
+              <label class="sr-only" for="sql-input">SQL</label>
+              <textarea
+                id="sql-input"
+                spellcheck="false"
+                placeholder="SQL runs against the SQLite file in memory. WRITE IMAGE stores that file in the carrier."
+              ></textarea>
+              <div id="sql-out" class="sql-out" aria-live="polite"></div>
+              <p class="sql-note">
+                PIPE: SQLITE → LSB. The file is a SQLite database run in memory (sql.js / WASM). RUN executes
+                this buffer (Ctrl+Enter). WRITE IMAGE or EMBED saves the current file, including inserts and
+                updates. A key encrypts it first. EXTRACT opens it again. Drop a .sqlite file on this column to load it.
+              </p>
+            </div>
             <div id="status" class="status" role="status">STANDBY // LOAD A CARRIER TO BEGIN</div>
           </div>
         </section>
@@ -335,7 +362,7 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             <h3>GPT CARRIER</h3>
             <p>
               On the carrier panel, <strong>GPT</strong> (next to LOCAL FILE) opens a prompt. <strong>SEND</strong>
-              calls OpenAI <code>gpt-image-1</code> with the key from the local <code>[stegano]</code> creds block
+              calls OpenAI <code>gpt-image-2.5-flare</code> with the key from the local <code>[stegano]</code> creds block
               (server-side only). Size comes from the synth <strong>W × H</strong> fields. Photos with grain and
               detail hide LSBs better than flat graphics. The image lands as SRC; type the payload in MSG and EMBED.
             </p>
@@ -353,8 +380,26 @@ MATCH  extract bits/channels/cipher/key must match embed</pre>
             </p>
           </section>
           <section>
+            <h3>SQL DATABASE</h3>
+            <p>
+              Toggle <strong>SQL</strong>. <strong>NEW</strong> starts an empty SQLite file in memory, or
+              <strong>LOAD DB</strong> opens a <code>.sqlite</code> / <code>.db</code> file. Nothing is written
+              to disk for the engine: <strong>sql.js</strong> runs the database in WebAssembly. Type SQL in the
+              buffer and <strong>RUN</strong> (or Ctrl+Enter). Result tables land under the buffer.
+              <strong>SCHEMA</strong> lists tables and views.
+            </p>
+            <p>
+              <strong>WRITE IMAGE</strong> or <strong>EMBED</strong> exports the database file and stores it in
+              the carrier LSBs, so inserts, updates, and schema changes survive. The payload is a
+              <code>DDDB</code> header plus the raw SQLite bytes. A key encrypts that file first, same as text
+              and binary. <strong>EXTRACT</strong> opens the file in memory again. <strong>DOWNLOAD</strong>
+              saves the <code>.sqlite</code> itself. A database that does not fit needs a larger carrier or more
+              bits per channel. Scaling the carrier destroys it.
+            </p>
+          </section>
+          <section>
             <h3>PAYLOAD PIPE</h3>
-            <p>No key: <code>TEXT → LSB</code> or <code>FILE → LSB</code>.</p>
+            <p>No key: <code>TEXT → LSB</code>, <code>FILE → LSB</code>, or <code>SQLITE → LSB</code>.</p>
             <p>With a key: <code>… → openssl enc → LSB</code> (raw <code>Salted__</code> ciphertext — no Base64).</p>
             <p>
               The frame prefix is <code>DDRS</code> + 32-bit length + 32-bit scatter seed, written sequentially
@@ -393,7 +438,8 @@ openssl enc -aes-256-cbc -d -pbkdf2 -pass pass:KEY</pre>
             <p>
               Embed writes <code>images/output/</code>. <strong>EXPORT PNG</strong> downloads that stego
               frame — it is disabled when the current payload will not fit. Reload from LIB, set the same
-              cipher/key, and EXTRACT. Recovered files download from <strong>BIN</strong>. WIPE restores the
+              cipher/key, and EXTRACT. Recovered files download from <strong>BIN</strong>. A SQL payload opens
+              in the SQL buffer; WRITE IMAGE stores later queries back into the PNG. WIPE restores the
               carrier and clears the message (not the key).
             </p>
           </section>

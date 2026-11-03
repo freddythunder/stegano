@@ -2,6 +2,8 @@ import { capacity, embed, extract, permuteIndex, stripFrame, toUtf8, fromUtf8, t
 import { joinEnvelopes, packFile, recoverFiles } from "./binfile.ts";
 import { decodePng, encodePng, pngToImageData } from "./png.ts";
 import { crypt as opensslCrypt } from "../server/openssl.ts";
+import { isSqliteBytes, packDb, packedDbSize, unpackDb } from "./sqldb.ts";
+import initSqlJs from "sql.js";
 
 class ImageDataPolyfill {
   data: Uint8ClampedArray;
@@ -153,6 +155,47 @@ try {
   assert(files[1].name === "shot.jpg" && files[1].bytes[0] === 0xff && files[1].bytes[1] === 0xd8, "jpeg file");
   const one = recoverFiles(a.envelope);
   assert(one.length === 1 && one[0].name === "note.txt", "single ddfile still unpacks");
+}
+
+{
+  const config: StegConfig = { bitsPerChannel: 1, channels: { r: true, g: true, b: true } };
+  const SQL = await initSqlJs();
+  const created = new SQL.Database();
+  created.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, note TEXT NOT NULL)");
+  created.run("INSERT INTO notes (note) VALUES (?)", ["field note"]);
+  const raw = created.export().slice();
+  assert(isSqliteBytes(raw), "engine export is sqlite");
+  assert(packedDbSize("notes.sqlite", raw.length) === packDb("notes.sqlite", raw).length, "packed size");
+  const packed = packDb("notes.sqlite", raw);
+  assert(recoverFiles(packed).length === 0, "dddb is not a binary file");
+  assert(unpackDb(packFile("a.txt", "text/plain", new TextEncoder().encode("hi")).envelope) === null, "ddfile is not a db");
+  const stego = embed(makeCarrier(200, 160), packed, config);
+  const opened = unpackDb(extract(stego, config));
+  if (!opened) throw new Error("sqlite name survives lsb");
+  assert(opened.name === "notes.sqlite", "sqlite name survives lsb");
+  assert(opened.bytes.length === raw.length && opened.bytes.every((byte, i) => byte === raw[i]), "sqlite bytes survive lsb");
+  const queried = new SQL.Database(opened.bytes);
+  const rows = queried.exec("SELECT note FROM notes");
+  assert(rows[0].values[0][0] === "field note", "select after extract");
+  queried.run("UPDATE notes SET note = ? WHERE id = 1", ["revised"]);
+  const again = packDb(opened.name, queried.export());
+  const stego2 = embed(makeCarrier(200, 160), again, config);
+  const saved = unpackDb(extract(stego2, config));
+  if (!saved) throw new Error("updated db unpacks");
+  const reread = new SQL.Database(saved.bytes);
+  assert(reread.exec("SELECT note FROM notes")[0].values[0][0] === "revised", "update survives a second embed");
+  const enc = await opensslCrypt("encrypt", "aes-256-cbc", "db-key", again);
+  const secret = embed(makeCarrier(220, 180), enc, config);
+  const plain = await opensslCrypt("decrypt", "aes-256-cbc", "db-key", extract(secret, config));
+  const unlocked = unpackDb(plain);
+  if (!unlocked) throw new Error("encrypted ddb name");
+  assert(unlocked.name === "notes.sqlite", "encrypted ddb name");
+  const hidden = new SQL.Database(unlocked.bytes);
+  assert(hidden.exec("SELECT note FROM notes")[0].values[0][0] === "revised", "select after decrypt");
+  created.close();
+  queried.close();
+  reread.close();
+  hidden.close();
 }
 
 console.log("ok", configs.length, "roundtrips");
